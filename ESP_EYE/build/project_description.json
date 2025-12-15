@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "ESP_EYE",
-    "project_version":    "047e486-dirty",
+    "project_version":    "66c5bf0-dirty",
     "project_path":       "/home/petr/school/3BIT/3BIT-Winter/IMP/IMP-projects/IMP-project/ESP_EYE",
     "idf_path":           "/home/petr/esp/v6.0/esp-idf",
     "build_dir":          "/home/petr/school/3BIT/3BIT-Winter/IMP/IMP-projects/IMP-project/ESP_EYE/build",

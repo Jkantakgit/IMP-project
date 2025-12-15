@@ -64,10 +64,16 @@ class App {
         return
       }
       const data = JSON.parse(text)
-      this.videos = (Array.isArray(data) ? data : []).map((item, i) =>
+      const list = Array.isArray((data as any).files)
+        ? (data as any).files
+        : Array.isArray(data)
+        ? data
+        : []
+      console.log('[UI] /videos parsed list', list)
+      this.videos = list.map((item, i) =>
         typeof item === 'string'
           ? { id: item, name: item }
-          : { id: String(item.id ?? i), name: String(item.name ?? `Video ${i + 1}`) }
+          : { id: String(item.name ?? item.id ?? i), name: String(item.name ?? item.id ?? `Video ${i + 1}`) }
       )
       this.selectedVideoId = this.selectedVideoId ?? this.videos[0]?.id ?? null
     } catch (err) {
@@ -97,10 +103,16 @@ class App {
         return
       }
       const data = JSON.parse(text)
-      this.photos = (Array.isArray(data) ? data : []).map((item, i) =>
+      const list = Array.isArray((data as any).files)
+        ? (data as any).files
+        : Array.isArray(data)
+        ? data
+        : []
+      console.log('[UI] /photos parsed list', list)
+      this.photos = list.map((item, i) =>
         typeof item === 'string'
           ? { id: item, name: item }
-          : { id: String(item.id ?? i), name: String(item.name ?? `Photo ${i + 1}`) }
+          : { id: String(item.name ?? item.id ?? i), name: String(item.name ?? item.id ?? `Photo ${i + 1}`) }
       )
       this.selectedPhotoId = this.selectedPhotoId ?? this.photos[0]?.id ?? null
     } catch (err) {

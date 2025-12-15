@@ -212,6 +212,7 @@ static esp_err_t list_directory_handler(httpd_req_t *req, const char *subdir)
 
     struct dirent *entry;
     int first = 1;
+    int sent = 0;
     while ((entry = readdir(dir)) != NULL) {
         struct stat file_stat;
         char filepath[FILE_PATH_MAX * 2];
@@ -228,11 +229,19 @@ static esp_err_t list_directory_handler(httpd_req_t *req, const char *subdir)
                      entry->d_name, file_stat.st_size);
             httpd_resp_sendstr_chunk(req, file_json);
             first = 0;
+            sent++;
+            if (sent <= 4) {
+                ESP_LOGI(TAG, "%s file: %s (%ld bytes)", subdir, entry->d_name, file_stat.st_size);
+            }
         }
     }
     closedir(dir);
     
     httpd_resp_sendstr_chunk(req, "]}");
+    ESP_LOGI(TAG, "%s response count=%d", subdir, sent);
+
+    /* Terminate chunked response */
+    httpd_resp_sendstr_chunk(req, NULL);
     return ESP_OK;
 }
 
