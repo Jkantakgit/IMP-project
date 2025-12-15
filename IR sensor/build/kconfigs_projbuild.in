@@ -1,0 +1,6 @@
+source "/home/petr/esp/v6.0/esp-idf/components/bootloader/Kconfig.projbuild"
+source "/home/petr/esp/v6.0/esp-idf/components/esp_app_format/Kconfig.projbuild"
+source "/home/petr/esp/v6.0/esp-idf/components/esp_rom/Kconfig.projbuild"
+source "/home/petr/esp/v6.0/esp-idf/components/esptool_py/Kconfig.projbuild"
+source "/home/petr/esp/v6.0/esp-idf/components/partition_table/Kconfig.projbuild"
+source "/home/petr/school/3BIT/3BIT-Winter/IMP/IMP-projects/IMP-project/IR sensor/main/Kconfig.projbuild"
