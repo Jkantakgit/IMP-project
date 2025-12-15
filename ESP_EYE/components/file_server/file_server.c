@@ -16,7 +16,7 @@
 #include "recorder.h"
 
 #define FILE_PATH_MAX 1024
-#define SCRATCH_BUFSIZE 4096   // 4KB is enough for ~6.5KB assets, saves RAM
+#define SCRATCH_BUFSIZE 16384   // 16KB chunk for faster downloads; PSRAM available
 
 struct file_server_data {
     char base_path[128];
@@ -89,6 +89,16 @@ static esp_err_t favicon_get_handler(httpd_req_t *req)
 static esp_err_t picture_post_handler(httpd_req_t *req)
 {
     struct file_server_data *server_data = (struct file_server_data *)req->user_ctx;
+    
+    /* Check if camera is busy */
+    extern bool is_camera_busy(void);
+    if (is_camera_busy()) {
+        ESP_LOGE(TAG, "Camera busy - cannot take photo while recording or another operation in progress");
+        httpd_resp_set_status(req, "202 Accepted");
+        httpd_resp_sendstr(req, "Camera busy - recording or another operation in progress");
+        return ESP_FAIL;
+    }
+    
     char filepath[FILE_PATH_MAX * 2];
     char pictures_dir[FILE_PATH_MAX];
     
@@ -146,6 +156,16 @@ static esp_err_t picture_post_handler(httpd_req_t *req)
 static esp_err_t video_post_handler(httpd_req_t *req)
 {
     struct file_server_data *server_data = (struct file_server_data *)req->user_ctx;
+    
+    /* Check if camera is busy */
+    extern bool is_camera_busy(void);
+    if (is_camera_busy()) {
+        ESP_LOGE(TAG, "Camera busy - cannot start recording while capturing photo or recording");
+        httpd_resp_set_status(req, "202 Accepted");
+        httpd_resp_sendstr(req, "Camera busy - photo capture or recording in progress");
+        return ESP_FAIL;
+    }
+    
     char filepath[FILE_PATH_MAX * 2];
     char videos_dir[FILE_PATH_MAX];
     
@@ -169,7 +189,7 @@ static esp_err_t video_post_handler(httpd_req_t *req)
     /* Generate filename using timestamp */
     static uint32_t video_counter = 0;
     uint32_t timestamp = (uint32_t)(esp_timer_get_time() / 1000000);  // seconds since boot
-    snprintf(filepath, sizeof(filepath), "%s/%lu_%lu.mp4", videos_dir, timestamp, video_counter++);
+    snprintf(filepath, sizeof(filepath), "%s/%lu_%lu.avi", videos_dir, timestamp, video_counter++);
     
     /* Start video recording with 30 second duration */
     ESP_LOGI(TAG, "Starting video recording to: %s", filepath);
@@ -185,7 +205,7 @@ static esp_err_t video_post_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     char json_response[512];
     snprintf(json_response, sizeof(json_response),
-             "{\"status\":\"ok\",\"filename\":\"%lu_%lu.mp4\",\"path\":\"/videos/%lu_%lu.mp4\"}",
+             "{\"status\":\"ok\",\"filename\":\"%lu_%lu.avi\",\"path\":\"/videos/%lu_%lu.avi\"}",
              timestamp, video_counter - 1, timestamp, video_counter - 1);
     httpd_resp_send(req, json_response, strlen(json_response));
     
@@ -198,6 +218,15 @@ static esp_err_t list_directory_handler(httpd_req_t *req, const char *subdir)
     struct file_server_data *server_data = (struct file_server_data *)req->user_ctx;
     char dirpath[FILE_PATH_MAX];
     snprintf(dirpath, sizeof(dirpath), "%s/%s", server_data->base_path, subdir);
+
+    // Check if recording - don't access SD card during recording
+    extern bool is_recording(void);
+    if (is_recording()) {
+        ESP_LOGD(TAG, "SD busy (recording), returning empty list");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"files\":[]}", strlen("{\"files\":[]}"));
+        return ESP_OK;
+    }
 
     DIR *dir = opendir(dirpath);
     if (!dir) {
@@ -247,13 +276,13 @@ static esp_err_t list_directory_handler(httpd_req_t *req, const char *subdir)
 
 static esp_err_t photos_get_handler(httpd_req_t *req)
 {
-    ESP_LOGE(TAG, "Photos GET handler called");
+    ESP_LOGI(TAG, "Photos GET");
     return list_directory_handler(req, "pictures");
 }
 
 static esp_err_t videos_get_handler(httpd_req_t *req)
 {
-    ESP_LOGE(TAG, "Videos GET handler called");
+    ESP_LOGI(TAG, "Videos GET");
     return list_directory_handler(req, "videos");
 }
 
@@ -268,6 +297,15 @@ static esp_err_t video_get_handler(httpd_req_t *req)
     
     /* Build full file path */
     snprintf(filepath, sizeof(filepath), "%s/videos/%s", server_data->base_path, video_id);
+    
+    /* Check if recording - don't access SD card during recording */
+    extern bool is_recording(void);
+    if (is_recording()) {
+        ESP_LOGW(TAG, "SD card busy (recording), cannot serve video");
+        httpd_resp_set_status(req, "202 Accepted");
+        httpd_resp_sendstr(req, "Recording in progress");
+        return ESP_FAIL;
+    }
     
     /* Check if file exists */
     struct stat file_stat;
@@ -286,7 +324,8 @@ static esp_err_t video_get_handler(httpd_req_t *req)
     }
     
     ESP_LOGI(TAG, "Serving video: %s (%ld bytes)", video_id, file_stat.st_size);
-    httpd_resp_set_type(req, "video/mp4");
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment");
     
     /* Send file in chunks */
     char *chunk = server_data->scratch;
@@ -407,6 +446,15 @@ static esp_err_t file_get_handler(httpd_req_t *req)
     
     /* Build full file path */
     snprintf(filepath, sizeof(filepath), "%s%s", server_data->base_path, uri);
+    
+    /* Check if recording - don't access SD card during recording */
+    extern bool is_recording(void);
+    if (is_recording()) {
+        ESP_LOGW(TAG, "SD card busy (recording), cannot serve file");
+        httpd_resp_set_status(req, "202 Accepted");
+        httpd_resp_sendstr(req, "Busy");
+        return ESP_FAIL;
+    }
     
     /* Check if file exists */
     struct stat file_stat;

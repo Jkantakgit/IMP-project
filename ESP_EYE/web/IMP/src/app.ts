@@ -245,7 +245,7 @@ class App {
               <div class="player__body">
                 ${
                   this.tab === 'videos'
-                    ? `<video controls src="/video/${encodeURIComponent(selected.id)}"></video>`
+                    ? `<div class="empty-state"><p class="muted">Preview disabled. Use download to view.</p></div>`
                     : `<img src="/photo/${encodeURIComponent(selected.id)}" alt="${selected.name}">`
                 }
                 <div class="meta">

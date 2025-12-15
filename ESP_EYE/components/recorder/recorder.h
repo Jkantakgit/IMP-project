@@ -1,7 +1,13 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stdbool.h>
 
+// Check if video is currently recording
+bool is_recording(void);
+
+// Check if camera is busy (photo capture or video recording in progress)
+bool is_camera_busy(void);
 
 // Initialize the camera. Returns ESP_OK on success.
 esp_err_t recorder_init(void);
