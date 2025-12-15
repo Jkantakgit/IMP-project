@@ -135,8 +135,8 @@ $<TARGET_FILE:__idf_fatfs>
 $<TARGET_FILE:idf::http_parser>
 $<TARGET_FILE:idf::esp_http_server>
 $<TARGET_FILE:idf::file_server>
-$<TARGET_FILE:idf::main>
 $<TARGET_FILE:__idf_recorder>
+$<TARGET_FILE:idf::main>
 $<TARGET_FILE:__idf_wifi>
 $<TARGET_FILE:__idf_sd_card>
 $<TARGET_FILE:__idf_file_server>
