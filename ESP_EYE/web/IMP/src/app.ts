@@ -58,12 +58,14 @@ class App {
       const res = await fetchWithTimeout('/videos', undefined, 10000)
       if (!res.ok) throw new Error(`Failed (${res.status})`)
       const text = await res.text()
+      console.log('[UI] /videos raw response:', text)
       if (!text) {
         this.videos = []
         this.selectedVideoId = null
         return
       }
       const data = JSON.parse(text)
+      console.log('[UI] /videos parsed JSON:', data)
       const list = Array.isArray((data as any).files)
         ? (data as any).files
         : Array.isArray(data)
@@ -97,12 +99,14 @@ class App {
       const res = await fetchWithTimeout('/photos', undefined, 10000)
       if (!res.ok) throw new Error(`Failed (${res.status})`)
       const text = await res.text()
+      console.log('[UI] /photos raw response:', text)
       if (!text) {
         this.photos = []
         this.selectedPhotoId = null
         return
       }
       const data = JSON.parse(text)
+      console.log('[UI] /photos parsed JSON:', data)
       const list = Array.isArray((data as any).files)
         ? (data as any).files
         : Array.isArray(data)

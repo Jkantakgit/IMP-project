@@ -27,7 +27,7 @@ static struct {
     .record_task_handle = NULL
 };
 
-// Camera configurations (primary = better quality, fallback = minimal)
+// Camera configurations (primary = best quality, medium = good, fallback = minimal)
 static camera_config_t camera_config_primary = {
     .pin_pwdn = 32,
     .pin_reset = -1,
@@ -49,8 +49,36 @@ static camera_config_t camera_config_primary = {
     .ledc_timer = LEDC_TIMER_0,
     .ledc_channel = LEDC_CHANNEL_0,
     .pixel_format = PIXFORMAT_JPEG,
-    .frame_size = FRAMESIZE_QVGA,     // Better quality
-    .jpeg_quality = 12,
+    .frame_size = FRAMESIZE_XGA,      // 1024x768 - XGA quality
+    .jpeg_quality = 10,
+    .fb_count = 1,
+    .fb_location = CAMERA_FB_IN_PSRAM,
+    .grab_mode = CAMERA_GRAB_LATEST
+};
+
+static camera_config_t camera_config_medium = {
+    .pin_pwdn = 32,
+    .pin_reset = -1,
+    .pin_xclk = 0,
+    .pin_sccb_sda = 26,
+    .pin_sccb_scl = 27,
+    .pin_d7 = 35,
+    .pin_d6 = 34,
+    .pin_d5 = 39,
+    .pin_d4 = 36,
+    .pin_d3 = 21,
+    .pin_d2 = 19,
+    .pin_d1 = 18,
+    .pin_d0 = 5,
+    .pin_vsync = 25,
+    .pin_href = 23,
+    .pin_pclk = 22,
+    .xclk_freq_hz = 20000000,
+    .ledc_timer = LEDC_TIMER_0,
+    .ledc_channel = LEDC_CHANNEL_0,
+    .pixel_format = PIXFORMAT_JPEG,
+    .frame_size = FRAMESIZE_QVGA,     // 320x240 - good quality
+    .jpeg_quality = 15,
     .fb_count = 1,
     .fb_location = CAMERA_FB_IN_PSRAM,
     .grab_mode = CAMERA_GRAB_LATEST
@@ -88,11 +116,52 @@ esp_err_t recorder_init(void)
 {
     esp_err_t err = esp_camera_init(&camera_config_primary);
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Camera initialized with primary config (QVGA, quality 12)");
+        ESP_LOGI(TAG, "Camera initialized with primary config (XGA 1024x768, quality 10)");
+        
+        // Apply sensor tuning for better image quality
+        sensor_t * s = esp_camera_sensor_get();
+        s->set_brightness(s, 0);     // -2 to 2
+        s->set_contrast(s, 0);       // -2 to 2
+        s->set_saturation(s, 0);     // -2 to 2
+        s->set_whitebal(s, 1);       // enable white balance
+        s->set_awb_gain(s, 1);       // enable auto white balance gain
+        s->set_wb_mode(s, 0);        // auto white balance mode
+        s->set_exposure_ctrl(s, 1);  // enable auto exposure
+        s->set_aec2(s, 0);           // disable AEC2
+        s->set_ae_level(s, 0);       // auto exposure level -2 to 2
+        s->set_aec_value(s, 300);    // auto exposure value 0-1200
+        s->set_gain_ctrl(s, 1);      // enable auto gain
+        s->set_agc_gain(s, 0);       // auto gain value 0-30
+        s->set_gainceiling(s, (gainceiling_t)0);  // gain ceiling
+        s->set_bpc(s, 0);            // disable black pixel correction
+        s->set_wpc(s, 1);            // enable white pixel correction
+        s->set_raw_gma(s, 1);        // enable gamma correction
+        s->set_lenc(s, 1);           // enable lens correction
+        s->set_hmirror(s, 0);        // disable horizontal mirror
+        s->set_vflip(s, 0);          // disable vertical flip
+        s->set_dcw(s, 1);            // enable downsize
+        
         return ESP_OK;
     }
 
-    ESP_LOGW(TAG, "Primary camera init failed (%s), trying fallback", esp_err_to_name(err));
+    ESP_LOGW(TAG, "Primary camera init failed (%s), trying medium", esp_err_to_name(err));
+
+    err = esp_camera_init(&camera_config_medium);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Camera initialized with medium config (QVGA 320x240, quality 15)");
+        
+        // Apply basic sensor tuning
+        sensor_t * s = esp_camera_sensor_get();
+        s->set_whitebal(s, 1);
+        s->set_awb_gain(s, 1);
+        s->set_exposure_ctrl(s, 1);
+        s->set_gain_ctrl(s, 1);
+        s->set_lenc(s, 1);
+        
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "Medium camera init failed (%s), trying fallback", esp_err_to_name(err));
 
     err = esp_camera_init(&camera_config_fallback);
     if (err != ESP_OK) {
@@ -100,7 +169,7 @@ esp_err_t recorder_init(void)
         return err;
     }
 
-    ESP_LOGI(TAG, "Camera initialized with fallback config (QQVGA, quality 30)");
+    ESP_LOGI(TAG, "Camera initialized with fallback config (QQVGA 160x120, quality 30)");
     return ESP_OK;
 }
 
