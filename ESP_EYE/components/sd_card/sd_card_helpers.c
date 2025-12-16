@@ -1,91 +1,69 @@
-/* SD card helper component
- * Provides mounting/unmounting and simple directory listing helpers.
- *
- * This uses the ESP-IDF FAT VFS helpers and supports SDMMC (native) or
- * SDSPI depending on SOC support and available drivers.
- */
-
-
+/* SD card helper component - SDSPI mounting */
 
 #include "sd_card_helpers.h"
-#include "driver/sdmmc_host.h"
-
-
-
+#include "esp_vfs_fat.h"
+#include "driver/spi_master.h"
+#include "driver/sdspi_host.h"
+#include "esp_log.h"
+#include <stdio.h>
 
 static const char *TAG = "sd_card";
+static sdmmc_card_t *s_card = NULL;
 
-esp_err_t sd_card_mount(const char *base_path)
+esp_err_t sd_card_mount_sdspi(const char *base_path, int mosi_gpio, int miso_gpio, int sclk_gpio, int cs_gpio)
 {
     if (!base_path) return ESP_ERR_INVALID_ARG;
 
-    /* Prefer SDMMC 4-bit mode for throughput on ESP32-CAM (GPIOs: CLK=14, CMD=15, D0=2, D1=4, D2=12, D3=13). */
-    ESP_LOGI(TAG, "Attempting SDMMC 4-bit mount at '%s'", base_path);
+    ESP_LOGI(TAG, "Mounting SD card via SDSPI at '%s'", base_path);
+
+    spi_bus_config_t buscfg = {
+        .mosi_io_num = mosi_gpio,
+        .miso_io_num = miso_gpio,
+        .sclk_io_num = sclk_gpio,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = 4 * 1024 * 1024  /* 4MB for faster transfers */
+    };
+
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    host.max_freq_khz = SPI_MASTER_FREQ_40M;  /* 40MHz SPI clock */
     
-    sdmmc_card_t *card = NULL;
-    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    // Use default frequency for more robust init; can negotiate HS later
-    host.max_freq_khz = SDMMC_FREQ_DEFAULT;
-    
-    /* SDMMC slot config for 4-bit mode with internal pull-ups to ensure reliable init. */
-    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
-    slot_config.width = 4;  // 4-bit mode for max speed
-    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-    
-    /* GPIO configuration:
-     * CMD:  GPIO15
-     * CLK:  GPIO14
-     * D0:   GPIO2
-     * D1:   GPIO4
-     * D2:   GPIO12
-     * D3:   GPIO13
-     */
+    esp_err_t err = spi_bus_initialize(host.slot, &buscfg, SPI_DMA_CH_AUTO);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+    slot_config.gpio_cs = cs_gpio;
+    slot_config.host_id = host.slot;
 
     esp_vfs_fat_mount_config_t mount_config = {
         .format_if_mount_failed = false,
-        .max_files = 5,
-        .allocation_unit_size = 64 * 1024  // 64KB clusters for large sequential writes
+        .max_files = 8,
+        .allocation_unit_size = 4 * 1024  /* 4KB clusters for faster I/O */
     };
 
-    esp_err_t err = esp_vfs_fat_sdmmc_mount(base_path, &host, &slot_config, &mount_config, &card);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "SDMMC mounted successfully (4-bit mode)");
-        sdmmc_card_print_info(stdout, card);
-        return ESP_OK;
+    err = esp_vfs_fat_sdspi_mount(base_path, &host, &slot_config, &mount_config, &s_card);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "SDSPI mount failed: %s", esp_err_to_name(err));
+        return err;
     }
-
-    ESP_LOGW(TAG, "SDMMC 4-bit mount failed (%s). Retrying 1-bit as fallback...", esp_err_to_name(err));
-
-    /* Retry in 1-bit mode with pull-ups on CMD/D0 for compatibility */
-    slot_config.width = 1;
-    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-    err = esp_vfs_fat_sdmmc_mount(base_path, &host, &slot_config, &mount_config, &card);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "SDMMC mounted successfully (1-bit fallback)");
-        sdmmc_card_print_info(stdout, card);
-        return ESP_OK;
-    }
-
-    ESP_LOGE(TAG, "SDMMC mount failed in both 4-bit and 1-bit (%s)", esp_err_to_name(err));
-    ESP_LOGE(TAG, "SD mount failures: check wiring, power, card format");
-    return err;
+    ESP_LOGI(TAG, "SD card mounted successfully");
+    return ESP_OK;
 }
 
-
-esp_err_t sd_card_list_dir(const char *path, void (*entry_cb)(const char *name, void *user), void *user)
+esp_err_t sd_card_unmount(const char *base_path)
 {
-    if (!path || !entry_cb) return ESP_ERR_INVALID_ARG;
+    if (!base_path) return ESP_ERR_INVALID_ARG;
+    if (!s_card) return ESP_ERR_INVALID_STATE;
 
-    DIR *dir = opendir(path);
-    if (!dir) {
-        ESP_LOGE(TAG, "Failed to open dir: %s", path);
-        return ESP_FAIL;
+    esp_err_t err = esp_vfs_fat_sdcard_unmount(base_path, s_card);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to unmount SD card: %s", esp_err_to_name(err));
+        return err;
     }
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        entry_cb(entry->d_name, user);
-    }
-    closedir(dir);
+    s_card = NULL;
+    ESP_LOGI(TAG, "SD card unmounted");
     return ESP_OK;
 }

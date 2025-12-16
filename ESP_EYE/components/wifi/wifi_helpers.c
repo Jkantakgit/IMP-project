@@ -61,6 +61,12 @@ esp_err_t wifi_helpers_init_ap(const char *ssid, const char *password)
     if (err != ESP_OK) return err;
     err = esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
     if (err != ESP_OK) return err;
+    /* Throughput tuning: disable power save, enable 11n, set bandwidth/tx power */
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+    esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
+    /* Max TX power (~20-21 dBm); units are 0.25 dBm. 78=19.5 dBm, 84=21 dBm (clamped). */
+    esp_wifi_set_max_tx_power(78);
     err = esp_wifi_start();
     if (err != ESP_OK) return err;
 
@@ -87,6 +93,11 @@ esp_err_t wifi_helpers_init_sta(const char *ssid, const char *password)
     if (err != ESP_OK) return err;
     err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
     if (err != ESP_OK) return err;
+    /* Throughput tuning: disable power save, enable 11n, prefer HT40 bandwidth */
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+    esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT40);
+    esp_wifi_set_max_tx_power(78);
     err = esp_wifi_start();
     if (err != ESP_OK) return err;
 

@@ -12,10 +12,7 @@
 
 static const char *TAG = "recorder";
 
-/* Forward declarations for file write helpers used in header writer */
-static void write_u32(FILE *f, uint32_t val);
-static void write_u16(FILE *f, uint16_t val);
-static void write_fourcc(FILE *f, const char *fourcc);
+#define BUFFER_FLUSH_THRESHOLD (video_state.buffer_size * 70 / 100)  // Flush at 70% full (~2.5MB chunks with SDMMC speed)
 
 // AVI/MJPEG structures
 typedef struct {
@@ -372,99 +369,16 @@ static void write_u32(FILE *f, uint32_t val) {
     fwrite(&val, 4, 1, f);
 }
 
-static void write_u16(FILE *f, uint16_t val) {
-    fwrite(&val, 2, 1, f);
-}
-
 static void write_fourcc(FILE *f, const char *fourcc) {
     fwrite(fourcc, 4, 1, f);
-}
-
-
-/* Write the initial AVI header to a file and leave position at start of movi data */
-static esp_err_t write_avi_header_to_file(FILE *f, uint32_t width, uint32_t height, uint32_t fps) {
-    // RIFF header
-    write_fourcc(f, "RIFF");
-    write_u32(f, 0); // placeholder for file size, updated in finalize
-    write_fourcc(f, "AVI ");
-
-    // hdrl LIST
-    write_fourcc(f, "LIST");
-    write_u32(f, 192); // hdrl size
-    write_fourcc(f, "hdrl");
-
-    // avih chunk
-    write_fourcc(f, "avih");
-    write_u32(f, 56); // avih size
-    write_u32(f, 1000000 / fps); // microseconds per frame
-    write_u32(f, 0); // max bytes per second
-    write_u32(f, 0); // padding granularity
-    write_u32(f, 0x10); // flags
-    write_u32(f, 0); // total frames (placeholder)
-    write_u32(f, 0); // initial frames
-    write_u32(f, 1); // streams
-    write_u32(f, 0); // suggested buffer size
-    write_u32(f, width);
-    write_u32(f, height);
-    write_u32(f, 0); // reserved
-    write_u32(f, 0); // reserved
-    write_u32(f, 0); // reserved
-    write_u32(f, 0); // reserved
-
-    // strl LIST
-    write_fourcc(f, "LIST");
-    write_u32(f, 116); // strl size
-    write_fourcc(f, "strl");
-
-    // strh chunk
-    write_fourcc(f, "strh");
-    write_u32(f, 56); // strh size
-    write_fourcc(f, "vids");
-    write_fourcc(f, "MJPG");
-    write_u32(f, 0); // flags
-    write_u16(f, 0); // priority
-    write_u16(f, 0); // language
-    write_u32(f, 0); // initial frames
-    write_u32(f, 1); // scale
-    write_u32(f, fps); // rate
-    write_u32(f, 0); // start
-    write_u32(f, 0); // length (placeholder)
-    write_u32(f, 0); // suggested buffer size
-    write_u32(f, 0xFFFFFFFF); // quality
-    write_u32(f, 0); // sample size
-    write_u16(f, 0); // frame left
-    write_u16(f, 0); // frame top
-    write_u16(f, width); // frame right
-    write_u16(f, height); // frame bottom
-
-    // strf chunk
-    write_fourcc(f, "strf");
-    write_u32(f, 40); // strf size
-    write_u32(f, 40); // BITMAPINFO size
-    write_u32(f, width);
-    write_u32(f, height);
-    write_u16(f, 1); // planes
-    write_u16(f, 24); // bit count
-    write_fourcc(f, "MJPG");
-    write_u32(f, width * height * 3); // image size
-    write_u32(f, 0); // X pixels per meter
-    write_u32(f, 0); // Y pixels per meter
-    write_u32(f, 0); // colors used
-    write_u32(f, 0); // colors important
-
-    // movi LIST
-    write_fourcc(f, "LIST");
-    write_u32(f, 0); // placeholder for movi size, updated in finalize
-    write_fourcc(f, "movi");
-
-    return ESP_OK;
 }
 
 
 static esp_err_t finalize_avi(FILE *f, uint32_t frame_count, uint32_t movi_size, avi_index_entry_t *index, uint32_t idx_count) {
     // Write index
     write_fourcc(f, "idx1");
-    write_u32(f, idx_count * 16);
+    uint32_t idx1_size = idx_count * 16;
+    write_u32(f, idx1_size);
     for (uint32_t i = 0; i < idx_count; i++) {
         write_fourcc(f, "00dc");
         write_u32(f, 0x10); // keyframe
@@ -474,28 +388,79 @@ static esp_err_t finalize_avi(FILE *f, uint32_t frame_count, uint32_t movi_size,
     
     long file_end = ftell(f);
     
-    // Update RIFF size
+    // Update RIFF size (entire file minus 8 bytes for RIFF header)
     fseek(f, 4, SEEK_SET);
     write_u32(f, file_end - 8);
     
-    // Update total frames in avih
+    // Update total frames in avih (at offset 48)
     fseek(f, 48, SEEK_SET);
     write_u32(f, frame_count);
     
-    // Update stream length in strh
+    // Update stream length in strh (at offset 140)
     fseek(f, 140, SEEK_SET);
     write_u32(f, frame_count);
     
-    // Update movi size
-    fseek(f, 220, SEEK_SET);
-    write_u32(f, movi_size);
+    // Update movi LIST size (4 bytes + 'movi' + frame data)
+    // The size field is 4 bytes before 'movi' fourcc
+    fseek(f, 216, SEEK_SET);  // movi LIST size is at offset 216
+    write_u32(f, movi_size + 4);  // +4 for 'movi' fourcc
     
     fseek(f, file_end, SEEK_SET);
     return ESP_OK;
 }
 
 /* Periodic buffer flush function to write buffer contents to SD */
-/* Direct-to-SD mode: no periodic flush needed */
+static esp_err_t flush_buffer_to_sd(const char *filepath) {
+    int64_t flush_start = esp_timer_get_time();
+    
+    /* Open/create file if this is the first flush */
+    if (!video_state.file_created) {
+        video_state.file = fopen(filepath, "wb");
+        if (!video_state.file) {
+            ESP_LOGE(TAG, "Failed to open file for writing: %s", filepath);
+            return ESP_FAIL;
+        }
+        
+        /* Set larger write buffer for better SD performance */
+        setvbuf(video_state.file, NULL, _IOFBF, 32768);  // 32KB buffer
+        
+        /* Write the header first */
+        size_t header_written = fwrite(video_state.psram_buffer, 1, video_state.header_size, video_state.file);
+        if (header_written != video_state.header_size) {
+            ESP_LOGE(TAG, "Failed to write AVI header");
+            fclose(video_state.file);
+            video_state.file = NULL;
+            return ESP_FAIL;
+        }
+        
+        video_state.file_created = true;
+        ESP_LOGI(TAG, "Created file and wrote %u byte header", video_state.header_size);
+    }
+    
+    /* Calculate how much frame data to flush (everything after header) */
+    uint32_t data_size = video_state.buffer_pos - video_state.header_size;
+    
+    if (data_size > 0) {
+        /* Write frame data to file */
+        size_t written = fwrite(video_state.psram_buffer + video_state.header_size, 1, data_size, video_state.file);
+        
+        if (written != data_size) {
+            ESP_LOGE(TAG, "Failed to flush buffer: wrote %u/%u bytes", written, data_size);
+            return ESP_FAIL;
+        }
+        
+        /* Force write to SD card immediately */
+        fflush(video_state.file);
+        
+        int64_t flush_time = (esp_timer_get_time() - flush_start) / 1000;
+        ESP_LOGI(TAG, "Flushed %u KB to SD in %lld ms", data_size / 1024, flush_time);
+        
+        /* Reset buffer position to after header (ready for more frames) */
+        video_state.buffer_pos = video_state.header_size;
+    }
+    
+    return ESP_OK;
+}
 
 static void video_record_task(void *pvParameters)
 {
@@ -504,7 +469,6 @@ static void video_record_task(void *pvParameters)
     ESP_LOGI(TAG, "Video recording task started");
     
     uint32_t frame_offset = 0;
-    int64_t last_frame_time = esp_timer_get_time();
     
     while (video_state.recording) {
         /* Check if duration has elapsed */
@@ -516,7 +480,6 @@ static void video_record_task(void *pvParameters)
             }
         }
         
-        int64_t loop_start = esp_timer_get_time();
         
         /* Capture frame */
         int64_t capture_start = esp_timer_get_time();
@@ -529,30 +492,32 @@ static void video_record_task(void *pvParameters)
             continue;
         }
         
-        // Reduced per-frame logging to avoid overhead
-
-        /* Write MJPEG frame chunk directly to SD file */
-        int64_t write_start = esp_timer_get_time();
-
-        // Write chunk header
-        write_fourcc(video_state.file, "00dc");
-        write_u32(video_state.file, fb->len);
-
-        // Write JPEG data
-        size_t written = fwrite(fb->buf, 1, fb->len, video_state.file);
-        if (written != fb->len) {
-            ESP_LOGE(TAG, "Failed to write frame data to file (%u/%u)", written, fb->len);
+        
+        // Write chunk header to buffer
+        uint8_t chunk_header[8];
+        uint32_t pos = 0;
+        static_write_fourcc(chunk_header, &pos, "00dc");
+        static_write_u32(chunk_header, &pos, fb->len);
+        
+        if (!write_to_buffer(chunk_header, 8)) {
+            ESP_LOGE(TAG, "Failed to write chunk header to buffer");
             esp_camera_fb_return(fb);
-            break;
+            continue;
         }
-
+        
+        // Write JPEG data to buffer
+        if (!write_to_buffer(fb->buf, fb->len)) {
+            ESP_LOGE(TAG, "Failed to write frame data to buffer");
+            esp_camera_fb_return(fb);
+            continue;
+        }
+        
         // Pad to even boundary
         if (fb->len & 1) {
             uint8_t pad = 0;
-            fwrite(&pad, 1, 1, video_state.file);
+            write_to_buffer(&pad, 1);
         }
-
-        // int64_t write_time = (esp_timer_get_time() - write_start) / 1000;
+    
         
         // Store index entry
         if (video_state.idx_count < 1800) { // max 1 minute at 30fps
@@ -568,36 +533,76 @@ static void video_record_task(void *pvParameters)
         
         /* Return frame buffer */
         esp_camera_fb_return(fb);
+
         
-        int64_t loop_time = (esp_timer_get_time() - loop_start) / 1000;
-        int64_t interval = (esp_timer_get_time() - last_frame_time) / 1000;
-        last_frame_time = esp_timer_get_time();
-        
-        // ESP_LOGD(TAG, "Frame %d complete: loop=%lld ms, interval=%lld ms", video_state.frame_count - 1, loop_time, interval);
+        /* Check if buffer needs flushing (80% threshold) */
+        if (video_state.buffer_pos >= BUFFER_FLUSH_THRESHOLD) {
+            ESP_LOGI(TAG, "Buffer at %u/%u bytes, flushing to SD...", video_state.buffer_pos, video_state.buffer_size);
+            if (flush_buffer_to_sd(filepath) != ESP_OK) {
+                ESP_LOGE(TAG, "Periodic flush failed, stopping recording");
+                break;
+            }
+        }
         
         /* Small delay between frames (~10 FPS) */
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     
-    /* Finalize AVI headers in the open file */
-    if (video_state.file) {
-        finalize_avi(video_state.file, video_state.frame_count, video_state.movi_size, 
+    
+    FILE *f = NULL;
+    
+    /* If file was created during periodic flushes, flush remaining data */
+    if (video_state.file_created) {
+        f = video_state.file;
+        
+        /* Flush any remaining buffered frames (after header) */
+        uint32_t remaining = video_state.buffer_pos - video_state.header_size;
+        if (remaining > 0) {
+            size_t written = fwrite(video_state.psram_buffer + video_state.header_size, 1, remaining, f);
+            if (written != remaining) {
+                ESP_LOGE(TAG, "Failed to write remaining buffer: wrote %u/%u bytes", written, remaining);
+            } else {
+                ESP_LOGI(TAG, "Flushed remaining %u bytes", written);
+            }
+        }
+    } else {
+        /* No periodic flushes occurred - write entire buffer at once */
+        f = fopen(filepath, "wb");
+        if (!f) {
+            ESP_LOGE(TAG, "Failed to open file for writing: %s", filepath);
+        } else {
+            size_t written = fwrite(video_state.psram_buffer, 1, video_state.buffer_pos, f);
+            
+            if (written != video_state.buffer_pos) {
+                ESP_LOGE(TAG, "Failed to write complete buffer: wrote %u/%u bytes", written, video_state.buffer_pos);
+            } else {
+                ESP_LOGI(TAG, "Buffer flushed successfully: %u bytes", written);
+            }
+        }
+    }
+    
+    /* Finalize AVI headers in the file */
+    if (f) {
+        finalize_avi(f, video_state.frame_count, video_state.movi_size, 
                      video_state.index, video_state.idx_count);
-        fclose(video_state.file);
+        fclose(f);
         video_state.file = NULL;
     }
     
     /* Free buffers */
+    if (video_state.psram_buffer) {
+        heap_caps_free(video_state.psram_buffer);
+        video_state.psram_buffer = NULL;
+    }
+    
     if (video_state.index) {
         free(video_state.index);
         video_state.index = NULL;
     }
     
     video_state.recording = false;
-    camera_busy = false; // release busy flag when task ends (duration-based stop)
+    video_state.file_created = false;
     video_state.record_task_handle = NULL;
-    
-    ESP_LOGI(TAG, "Video recording finished: %d frames", video_state.frame_count);
     
     /* Free the filepath string */
     free((void *)filepath);
@@ -632,33 +637,40 @@ esp_err_t recorder_start_video(const char *filepath, uint32_t duration_ms)
     video_state.height = status.framesize <= FRAMESIZE_QVGA ? 240 :
                          status.framesize == FRAMESIZE_VGA ? 480 : 768;
     
+    /* Check available PSRAM before allocation */
+    size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    size_t largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "PSRAM available: %u bytes total, %u bytes largest block", free_psram, largest_free_block);
+    
+    /* Allocate PSRAM buffer for video data (MEMMAP mode allows up to 8MB) */
+    video_state.psram_buffer = (uint8_t *)heap_caps_malloc(video_state.buffer_size, MALLOC_CAP_SPIRAM);
+    if (!video_state.psram_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate %u MB PSRAM buffer (available %u bytes)", 
+                 video_state.buffer_size / (1024*1024), largest_free_block);
+        camera_busy = false;
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "Allocated %d bytes (%d MB) PSRAM buffer for video", 
+             video_state.buffer_size, video_state.buffer_size / (1024*1024));
+    
     /* Allocate index buffer (max 1800 frames = 3 minutes at 10fps) */
     video_state.index = (avi_index_entry_t *)malloc(1800 * sizeof(avi_index_entry_t));
     if (!video_state.index) {
         ESP_LOGE(TAG, "Failed to allocate index buffer");
+        heap_caps_free(video_state.psram_buffer);
+        video_state.psram_buffer = NULL;
         camera_busy = false;
         return ESP_FAIL;
     }
-
-    /* Open file and write AVI header immediately (direct-to-SD mode) */
-    video_state.file = fopen(filepath, "wb");
-    if (!video_state.file) {
-        ESP_LOGE(TAG, "Failed to open file for writing: %s", filepath);
-        free(video_state.index);
-        video_state.index = NULL;
-        camera_busy = false;
-        return ESP_FAIL;
-    }
-    setvbuf(video_state.file, NULL, _IOFBF, 32768); // 32KB file buffer
-    if (write_avi_header_to_file(video_state.file, video_state.width, video_state.height, 10) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to write AVI header to file");
-        fclose(video_state.file);
-        video_state.file = NULL;
-        free(video_state.index);
-        video_state.index = NULL;
-        camera_busy = false;
-        return ESP_FAIL;
-    }
+    
+    /* Don't open file yet - will open for writing during periodic flush or at end */
+    video_state.file = NULL;
+    video_state.file_created = false;
+    video_state.buffer_pos = 0;
+    
+    /* Write AVI header to PSRAM buffer and store its size */
+    video_state.header_size = static_write_avi_header_to_buffer(video_state.width, video_state.height, 10);
+    ESP_LOGI(TAG, "AVI header size: %u bytes", video_state.header_size);
     
     /* Set recording state */
     video_state.recording = true;
@@ -672,11 +684,11 @@ esp_err_t recorder_start_video(const char *filepath, uint32_t duration_ms)
     char *filepath_copy = strdup(filepath);
     if (!filepath_copy) {
         ESP_LOGE(TAG, "Failed to allocate memory for filepath");
+        heap_caps_free(video_state.psram_buffer);
+        video_state.psram_buffer = NULL;
         free(video_state.index);
         video_state.index = NULL;
         video_state.recording = false;
-        fclose(video_state.file);
-        video_state.file = NULL;
         camera_busy = false;
         return ESP_FAIL;
     }
@@ -693,11 +705,11 @@ esp_err_t recorder_start_video(const char *filepath, uint32_t duration_ms)
     
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create video recording task");
+        heap_caps_free(video_state.psram_buffer);
+        video_state.psram_buffer = NULL;
         free(video_state.index);
         video_state.index = NULL;
         video_state.recording = false;
-        fclose(video_state.file);
-        video_state.file = NULL;
         camera_busy = false;
         free(filepath_copy);
         return ESP_FAIL;

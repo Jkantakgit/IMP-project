@@ -1,28 +1,18 @@
 #pragma once
 
-
-#include <stdio.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <dirent.h>
-
 #include "esp_err.h"
-#include "esp_log.h"
-#include "esp_err.h"
-#include "esp_vfs_fat.h"
-#include "sdmmc_cmd.h"
-#include "driver/sdmmc_host.h"
-#include "driver/sdspi_host.h"
-#include "driver/spi_common.h"
 
+/* Mount SD card via SDSPI (SPI-based SD). Provide MOSI/MISO/SCLK/CS GPIO numbers. */
+esp_err_t sd_card_mount_sdspi(const char *base_path, int mosi_gpio, int miso_gpio, int sclk_gpio, int cs_gpio);
 
-// Mount the SD card to the given base path (e.g. "/sdcard").
-// Returns ESP_OK on success.
-esp_err_t sd_card_mount(const char *base_path);
-
-// Unmount the SD card previously mounted at base_path.
+/* Unmount the SD card previously mounted at base_path. */
 esp_err_t sd_card_unmount(const char *base_path);
 
-// List directory entries under `path`. The callback will be called for each
-// filename found. Returns ESP_OK if directory was opened, otherwise an error.
-esp_err_t sd_card_list_dir(const char *path, void (*entry_cb)(const char *name, void *user), void *user);
+// Mount SDMMC in 1-bit mode (if supported by the SDK/host).
+// This mirrors `SD_MMC.begin()` with 1-bit operation.
+esp_err_t sd_card_mount_1bit(const char *base_path);
+
+// Probe and attempt multiple SD mount methods (deinit recorder, try multiple
+// SDMMC pin maps in full/1-bit modes and finally SDSPI). Returns first
+// successful `esp_err_t` or last error.
+esp_err_t sd_card_mount_probe(const char *base_path);

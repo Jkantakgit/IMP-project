@@ -16,7 +16,7 @@
 #include "recorder.h"
 
 #define FILE_PATH_MAX 1024
-#define SCRATCH_BUFSIZE 16384   // 16KB chunk for faster downloads; PSRAM available
+#define SCRATCH_BUFSIZE 32768   // 32KB chunk for faster downloads; PSRAM available
 
 struct file_server_data {
     char base_path[128];
@@ -86,72 +86,7 @@ static esp_err_t favicon_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-static esp_err_t picture_post_handler(httpd_req_t *req)
-{
-    struct file_server_data *server_data = (struct file_server_data *)req->user_ctx;
-    
-    /* Check if camera is busy */
-    extern bool is_camera_busy(void);
-    if (is_camera_busy()) {
-        ESP_LOGE(TAG, "Camera busy - cannot take photo while recording or another operation in progress");
-        httpd_resp_set_status(req, "202 Accepted");
-        httpd_resp_sendstr(req, "Camera busy - recording or another operation in progress");
-        return ESP_FAIL;
-    }
-    
-    char filepath[FILE_PATH_MAX * 2];
-    char pictures_dir[FILE_PATH_MAX];
-    
-    /* Create pictures directory if it doesn't exist */
-    snprintf(pictures_dir, sizeof(pictures_dir), "%s/pictures", server_data->base_path);
-    if (strlen(server_data->base_path) + 10 >= FILE_PATH_MAX) {
-        ESP_LOGE(TAG, "Path too long");
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Path too long");
-        return ESP_FAIL;
-    }
-    struct stat st;
-    if (stat(pictures_dir, &st) == -1) {
-        ESP_LOGI(TAG, "Creating pictures directory: %s", pictures_dir);
-        if (mkdir(pictures_dir, 0775) != 0) {
-            ESP_LOGE(TAG, "Failed to create pictures directory");
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to create directory");
-            return ESP_FAIL;
-        }
-    }
-    
-    /* Generate filename using timestamp */
-    static uint32_t photo_counter = 0;
-    uint32_t timestamp = (uint32_t)(esp_timer_get_time() / 1000000);  // seconds since boot
-    snprintf(filepath, sizeof(filepath), "%s/%lu_%lu.jpg", pictures_dir, timestamp, photo_counter++);
-    
-    /* Capture and save photo */
-    ESP_LOGI(TAG, "Capturing photo to: %s", filepath);
-    esp_err_t ret = recorder_capture_to_file(filepath);
-    
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to capture photo");
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to capture photo");
-        return ESP_FAIL;
-    }
-    
-    /* Get file size */
-    struct stat file_stat;
-    long file_size = 0;
-    if (stat(filepath, &file_stat) == 0) {
-        file_size = file_stat.st_size;
-    }
-    
-    /* Send JSON response */
-    httpd_resp_set_type(req, "application/json");
-    char json_response[512];
-    snprintf(json_response, sizeof(json_response),
-             "{\"status\":\"ok\",\"filename\":\"%lu_%lu.jpg\",\"path\":\"/photos/%lu_%lu.jpg\",\"size\":%ld}",
-             timestamp, photo_counter - 1, timestamp, photo_counter - 1, file_size);
-    httpd_resp_send(req, json_response, strlen(json_response));
-    
-    ESP_LOGI(TAG, "Photo saved successfully: %s (%ld bytes)", filepath, file_size);
-    return ESP_OK;
-}
+/* photo endpoints removed */
 
 static esp_err_t video_post_handler(httpd_req_t *req)
 {
@@ -191,9 +126,9 @@ static esp_err_t video_post_handler(httpd_req_t *req)
     uint32_t timestamp = (uint32_t)(esp_timer_get_time() / 1000000);  // seconds since boot
     snprintf(filepath, sizeof(filepath), "%s/%lu_%lu.avi", videos_dir, timestamp, video_counter++);
     
-    /* Start video recording with 30 second duration */
+    /* Start video recording with 10 second duration */
     ESP_LOGI(TAG, "Starting video recording to: %s", filepath);
-    esp_err_t ret = recorder_start_video(filepath, 30000);  // 30 seconds in ms
+    esp_err_t ret = recorder_start_video(filepath, 10000);  // 10 seconds in ms
     
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start video recording");
@@ -222,7 +157,7 @@ static esp_err_t list_directory_handler(httpd_req_t *req, const char *subdir)
     // Check if recording - don't access SD card during recording
     extern bool is_recording(void);
     if (is_recording()) {
-        ESP_LOGD(TAG, "SD busy (recording), returning empty list");
+        ESP_LOGW(TAG, "SD card busy (recording), returning empty list");
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, "{\"files\":[]}", strlen("{\"files\":[]}"));
         return ESP_OK;
@@ -274,15 +209,11 @@ static esp_err_t list_directory_handler(httpd_req_t *req, const char *subdir)
     return ESP_OK;
 }
 
-static esp_err_t photos_get_handler(httpd_req_t *req)
-{
-    ESP_LOGI(TAG, "Photos GET");
-    return list_directory_handler(req, "pictures");
-}
+/* photos endpoint removed */
 
 static esp_err_t videos_get_handler(httpd_req_t *req)
 {
-    ESP_LOGI(TAG, "Videos GET");
+    ESP_LOGE(TAG, "Videos GET handler called");
     return list_directory_handler(req, "videos");
 }
 
@@ -323,8 +254,17 @@ static esp_err_t video_get_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
     
+    /* Enable large read-ahead buffer to decouple SD read latency from Wi-Fi */
+    static char *video_buffer = NULL;
+    if (!video_buffer) {
+        video_buffer = heap_caps_malloc(65536, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (video_buffer) {
+        setvbuf(fd, video_buffer, _IOFBF, 65536);
+    }
+    
     ESP_LOGI(TAG, "Serving video: %s (%ld bytes)", video_id, file_stat.st_size);
-    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_type(req, "video/x-msvideo");
     httpd_resp_set_hdr(req, "Content-Disposition", "attachment");
     
     /* Send file in chunks */
@@ -348,67 +288,9 @@ static esp_err_t video_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-static esp_err_t photo_get_handler(httpd_req_t *req)
-{
-    struct file_server_data *server_data = (struct file_server_data *)req->user_ctx;
-    char filepath[FILE_PATH_MAX];
-    
-    /* Extract photo ID from URI: /photo/{id} */
-    const char *uri = req->uri;
-    const char *photo_id = uri + 7;  // Skip "/photo/" prefix
-    
-    /* Build full file path */
-    snprintf(filepath, sizeof(filepath), "%s/pictures/%s", server_data->base_path, photo_id);
-    
-    /* Check if file exists */
-    struct stat file_stat;
-    if (stat(filepath, &file_stat) == -1) {
-        ESP_LOGE(TAG, "Photo file not found: %s", filepath);
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Photo not found");
-        return ESP_FAIL;
-    }
-    
-    /* Open file */
-    FILE *fd = fopen(filepath, "r");
-    if (!fd) {
-        ESP_LOGE(TAG, "Failed to open photo: %s", filepath);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to open photo");
-        return ESP_FAIL;
-    }
-    
-    ESP_LOGI(TAG, "Serving photo: %s (%ld bytes)", photo_id, file_stat.st_size);
-    httpd_resp_set_type(req, "image/jpeg");
-    
-    /* Send file in chunks */
-    char *chunk = server_data->scratch;
-    size_t chunksize;
-    do {
-        chunksize = fread(chunk, 1, SCRATCH_BUFSIZE, fd);
-        if (chunksize > 0) {
-            if (httpd_resp_send_chunk(req, chunk, chunksize) != ESP_OK) {
-                fclose(fd);
-                ESP_LOGE(TAG, "Photo send failed");
-                httpd_resp_sendstr_chunk(req, NULL);
-                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to send photo");
-                return ESP_FAIL;
-            }
-        }
-    } while (chunksize != 0);
-    
-    fclose(fd);
-    httpd_resp_send_chunk(req, NULL, 0);
-    return ESP_OK;
-}
+/* photo GET handler removed */
 
-static esp_err_t photo_root_get_handler(httpd_req_t *req)
-{
-    /* Handle GET /photo without an id */
-    httpd_resp_set_status(req, "400 Bad Request");
-    httpd_resp_set_type(req, "text/plain");
-    const char *msg = "Provide /photo/{filename.jpg} or use POST /photo to capture";
-    httpd_resp_send(req, msg, strlen(msg));
-    return ESP_OK;
-}
+/* photo root handler removed */
 
 
 
@@ -472,6 +354,15 @@ static esp_err_t file_get_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
     
+    /* Enable large read-ahead buffer to decouple SD read latency from Wi-Fi */
+    static char *generic_buffer = NULL;
+    if (!generic_buffer) {
+        generic_buffer = heap_caps_malloc(65536, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (generic_buffer) {
+        setvbuf(fd, generic_buffer, _IOFBF, 65536);
+    }
+    
     ESP_LOGI(TAG, "Serving file: %s (%ld bytes)", uri, file_stat.st_size);
     set_content_type_from_file(req, uri);
     
@@ -487,8 +378,6 @@ static esp_err_t file_get_handler(httpd_req_t *req)
                 /* Don't try to send error - socket is already broken */
                 return ESP_FAIL;
             }
-            /* Small delay to prevent overwhelming WiFi */
-            vTaskDelay(pdMS_TO_TICKS(1));
         }
     } while (chunksize != 0);
     
@@ -513,8 +402,7 @@ esp_err_t example_start_file_server(const char *base_path)
     }
     strlcpy(server_data->base_path, base_path, sizeof(server_data->base_path));
 
-    /* Ensure media directories exist */
-    ensure_subdir(base_path, "pictures");
+    /* Ensure video directory exists */
     ensure_subdir(base_path, "videos");
 
     /* List all files in the base path for debugging */
@@ -545,15 +433,6 @@ esp_err_t example_start_file_server(const char *base_path)
     };
     httpd_register_uri_handler(server, &favicon);
 
-    /* Picture capture handler (POST to /photo) */
-    httpd_uri_t photo_post = {
-        .uri = "/photo",
-        .method = HTTP_POST,
-        .handler = picture_post_handler,
-        .user_ctx = server_data
-    };
-    httpd_register_uri_handler(server, &photo_post);
-
     /* Video recording handler (POST to /video) */
     httpd_uri_t video_post = {
         .uri = "/video",
@@ -563,15 +442,6 @@ esp_err_t example_start_file_server(const char *base_path)
     };
     httpd_register_uri_handler(server, &video_post);
 
-    /* Photos list handler */
-    httpd_uri_t photos = {
-        .uri = "/photos",
-        .method = HTTP_GET,
-        .handler = photos_get_handler,
-        .user_ctx = server_data
-    };
-    httpd_register_uri_handler(server, &photos);
-
     /* Videos list handler */
     httpd_uri_t videos = {
         .uri = "/videos",
@@ -580,24 +450,6 @@ esp_err_t example_start_file_server(const char *base_path)
         .user_ctx = server_data
     };
     httpd_register_uri_handler(server, &videos);
-
-    /* Photo download handler (GET /photo/{id}) */
-    httpd_uri_t photo_get = {
-        .uri = "/photo/*",
-        .method = HTTP_GET,
-        .handler = photo_get_handler,
-        .user_ctx = server_data
-    };
-    httpd_register_uri_handler(server, &photo_get);
-
-    /* Photo root handler (GET /photo) to guide clients */
-    httpd_uri_t photo_root_get = {
-        .uri = "/photo",
-        .method = HTTP_GET,
-        .handler = photo_root_get_handler,
-        .user_ctx = server_data
-    };
-    httpd_register_uri_handler(server, &photo_root_get);
 
     /* Video download handler (GET /video/{id}) */
     httpd_uri_t video_get = {
