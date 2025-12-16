@@ -1,10 +1,4 @@
-import { StrictMode } from 'react'
-import { createRoot } from 'react-dom/client'
-import './index.css'
-import App from './App.tsx'
+// Minimal entry that defers to the DOM-based app in src/app.ts
+import './app.ts'
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-)
+// No runtime JSX or React required.

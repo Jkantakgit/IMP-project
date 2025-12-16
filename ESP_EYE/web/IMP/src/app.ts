@@ -4,21 +4,17 @@ function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit, timeout 
   const controller = new AbortController()
   const id = setTimeout(() => controller.abort(), timeout)
   const finalInit: RequestInit = { ...(init || {}), signal: controller.signal }
-  return fetch(input, finalInit)
-    .finally(() => clearTimeout(id))
+  return fetch(input, finalInit).finally(() => clearTimeout(id))
 }
 
-type Tab = 'videos' | 'photos'
 type MediaItem = { id: string; name: string }
 
 class App {
-  private tab: Tab = 'videos'
   private videos: MediaItem[] = []
-  private photos: MediaItem[] = []
   private selectedVideoId: string | null = null
-  private selectedPhotoId: string | null = null
   private loading = false
   private error: string | null = null
+  private statusMessage: string | null = null
 
   constructor() {
     this.init()
@@ -31,31 +27,25 @@ class App {
   }
 
   private attachEventListeners() {
-    document.getElementById('tab-videos')?.addEventListener('click', () => this.switchTab('videos'))
-    document.getElementById('tab-photos')?.addEventListener('click', () => this.switchTab('photos'))
+    // Single-tab UI; no tab switching required
     document.getElementById('btn-refresh')?.addEventListener('click', () => this.loadData())
     document.getElementById('btn-take')?.addEventListener('click', () => this.takeMedia())
   }
 
-  private async switchTab(tab: Tab) {
-    this.tab = tab
-    this.update()
-    await this.loadData()
-  }
 
   private async loadData() {
-    if (this.tab === 'videos') await this.loadVideos()
-    else await this.loadPhotos()
+    await this.loadVideos()
   }
 
   private async loadVideos() {
     this.loading = true
     this.error = null
+    this.statusMessage = null
     this.update()
 
     try {
       console.log('[UI] Fetching /videos …')
-      const res = await fetchWithTimeout('/videos', undefined, 10000)
+      const res = await fetchWithTimeout('/videos', { method: 'GET', headers: { Accept: 'application/json' } }, 10000)
       if (!res.ok) throw new Error(`Failed (${res.status})`)
       const text = await res.text()
       console.log('[UI] /videos raw response:', text)
@@ -72,7 +62,7 @@ class App {
         ? data
         : []
       console.log('[UI] /videos parsed list', list)
-      this.videos = list.map((item, i) =>
+      this.videos = list.map((item: any, i: number) =>
         typeof item === 'string'
           ? { id: item, name: item }
           : { id: String(item.name ?? item.id ?? i), name: String(item.name ?? item.id ?? `Video ${i + 1}`) }
@@ -89,53 +79,19 @@ class App {
     }
   }
 
-  private async loadPhotos() {
-    this.loading = true
-    this.error = null
-    this.update()
-
-    try {
-      console.log('[UI] Fetching /photos …')
-      const res = await fetchWithTimeout('/photos', undefined, 10000)
-      if (!res.ok) throw new Error(`Failed (${res.status})`)
-      const text = await res.text()
-      console.log('[UI] /photos raw response:', text)
-      if (!text) {
-        this.photos = []
-        this.selectedPhotoId = null
-        return
-      }
-      const data = JSON.parse(text)
-      console.log('[UI] /photos parsed JSON:', data)
-      const list = Array.isArray((data as any).files)
-        ? (data as any).files
-        : Array.isArray(data)
-        ? data
-        : []
-      console.log('[UI] /photos parsed list', list)
-      this.photos = list.map((item, i) =>
-        typeof item === 'string'
-          ? { id: item, name: item }
-          : { id: String(item.name ?? item.id ?? i), name: String(item.name ?? item.id ?? `Photo ${i + 1}`) }
-      )
-      this.selectedPhotoId = this.selectedPhotoId ?? this.photos[0]?.id ?? null
-    } catch (err) {
-      console.error('[UI] /photos error:', err)
-      this.error = err instanceof Error ? err.message : 'Unknown error'
-      this.photos = []
-      this.selectedPhotoId = null
-    } finally {
-      this.loading = false
-      this.update()
-    }
-  }
-
   private async takeMedia() {
-    const endpoint = this.tab === 'videos' ? '/video' : '/photo'
+    const endpoint = '/video'
     try {
       console.log('[UI] Trigger', endpoint)
       const res = await fetchWithTimeout(endpoint, { method: 'POST' }, 15000)
+      if (res.status === 202) {
+        // Server accepted recording request and is busy recording.
+        this.statusMessage = 'Recording started — the device is busy. File will appear after recording finishes.'
+        this.update()
+        return
+      }
       if (!res.ok) throw new Error(`Failed (${res.status})`)
+      // On successful immediate response, refresh list
       await this.loadData()
     } catch (err) {
       console.error('[UI] trigger error:', err)
@@ -161,17 +117,11 @@ class App {
         this.update()
       })
     )
-    document.querySelectorAll('[data-photo-id]').forEach((el) =>
-      el.addEventListener('click', () => {
-        this.selectedPhotoId = (el as HTMLElement).dataset.photoId!
-        this.update()
-      })
-    )
   }
 
   private render() {
-    const items = this.tab === 'videos' ? this.videos : this.photos
-    const selectedId = this.tab === 'videos' ? this.selectedVideoId : this.selectedPhotoId
+    const items = this.videos
+    const selectedId = this.selectedVideoId
     const selected = items.find((i) => i.id === selectedId)
 
     return `
@@ -180,31 +130,25 @@ class App {
           <p class="eyebrow">Camera console</p>
           <div class="hero__row">
             <div>
-              <h1>${this.tab === 'videos' ? 'Video' : 'Photo'} library</h1>
-              <p class="subhead">${
-                this.tab === 'videos'
-                  ? 'Browse, preview, and download recordings served from your device.'
-                  : 'View and download photos captured by your device.'
-              }</p>
+              <h1>Video library</h1>
+              <p class="subhead">Browse and download recordings from your device (download-only).</p>
+              ${this.statusMessage ? `<p class="status">${this.statusMessage}</p>` : ''}
             </div>
             <div class="hero__actions">
-              <button class="primary" id="btn-take">${
-                this.tab === 'videos' ? '🎥 Take video' : '📷 Take photo'
-              }</button>
+              <button class="primary" id="btn-take">🎥 Take video</button>
               <button class="secondary" id="btn-refresh" ${this.loading ? 'disabled' : ''}>${this.loading ? 'Refreshing…' : 'Refresh'}</button>
             </div>
           </div>
         </header>
 
         <nav class="tabs">
-          <button class="tab ${this.tab === 'videos' ? 'active' : ''}" id="tab-videos">Videos</button>
-          <button class="tab ${this.tab === 'photos' ? 'active' : ''}" id="tab-photos">Photos</button>
+          <button class="tab active" id="tab-videos">Videos</button>
         </nav>
 
         <section class="layout">
           <aside class="panel">
             <div class="panel__header">
-              <h2>Available ${this.tab}</h2>
+              <h2>Available videos</h2>
               <span class="badge">${items.length}</span>
             </div>
             ${this.loading ? '<p class="muted">Loading…</p>' : ''}
@@ -215,8 +159,7 @@ class App {
                 .map(
                   (item) => `
                 <li>
-                  <button class="video-item ${item.id === selectedId ? 'active' : ''}" 
-                    data-${this.tab === 'videos' ? 'video' : 'photo'}-id="${item.id}">
+                  <button class="video-item ${item.id === selectedId ? 'active' : ''}" data-video-id="${item.id}">
                     <span class="video-name">${item.name}</span>
                     <span class="video-id">${item.id}</span>
                   </button>
@@ -230,27 +173,24 @@ class App {
           <main class="panel">
             <div class="panel__header">
               <h2>Preview</h2>
-              ${
-                selected
-                  ? `<a class="secondary" href="/${this.tab === 'videos' ? 'video' : 'photo'}/${encodeURIComponent(
-                      selected.id
-                    )}" download>Download</a>`
-                  : ''
-              }
+              ${selected ? `<a class="primary" href="/video/${encodeURIComponent(selected.id)}" download>Download</a>` : ''}
             </div>
             ${
               !selected
-                ? '<div class="empty-state"><p class="muted">Select an item to preview.</p></div>'
+                ? '<div class="empty-state"><p class="muted">Select a recording to download.</p></div>'
                 : `
               <div class="player__body">
-                ${
-                  this.tab === 'videos'
-                    ? `<div class="empty-state"><p class="muted">Preview disabled. Use download to view.</p></div>`
-                    : `<img src="/photo/${encodeURIComponent(selected.id)}" alt="${selected.name}">`
-                }
-                <div class="meta">
-                  <div><p class="eyebrow">Title</p><p class="meta__value">${selected.name}</p></div>
-                  <div><p class="eyebrow">ID</p><p class="meta__value">${selected.id}</p></div>
+                <div class="player-grid">
+                  <div class="player-preview">
+                    <div class="preview-placeholder">Preview disabled (SD card limits). Use the Download button.</div>
+                  </div>
+                  <div class="player-actions">
+                    <a class="primary large" href="/video/${encodeURIComponent(selected.id)}" download>Download recording</a>
+                    <div class="meta" style="margin-top:12px">
+                      <div><p class="eyebrow">Title</p><p class="meta__value">${selected.name}</p></div>
+                      <div><p class="eyebrow">ID</p><p class="meta__value">${selected.id}</p></div>
+                    </div>
+                  </div>
                 </div>
               </div>
             `

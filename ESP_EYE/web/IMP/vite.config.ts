@@ -1,13 +1,10 @@
 import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+import { viteSingleFile } from 'vite-plugin-singlefile'
 
-// https://vite.dev/config/
+// Minimal Vite config (no React plugin)
 export default defineConfig({
   plugins: [
-    react({
-      babel: {
-        plugins: [['babel-plugin-react-compiler']],
-      },
-    }),
+    // Inline CSS/JS into the generated HTML to produce a single-file build
+    viteSingleFile(),
   ],
 })
