@@ -10,8 +10,8 @@ function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit, timeout 
 type MediaItem = { id: string; name: string }
 
 class App {
-  private videos: MediaItem[] = []
-  private selectedVideoId: string | null = null
+  private photos: MediaItem[] = []
+  private selectedPhotoId: string | null = null
   private loading = false
   private error: string | null = null
   private statusMessage: string | null = null
@@ -34,45 +34,45 @@ class App {
 
 
   private async loadData() {
-    await this.loadVideos()
+    await this.loadPhotos()
   }
 
-  private async loadVideos() {
+  private async loadPhotos() {
     this.loading = true
     this.error = null
     this.statusMessage = null
     this.update()
 
     try {
-      console.log('[UI] Fetching /videos …')
-      const res = await fetchWithTimeout('/videos', { method: 'GET', headers: { Accept: 'application/json' } }, 10000)
+      console.log('[UI] Fetching /photos …')
+      const res = await fetchWithTimeout('/photos', { method: 'GET', headers: { Accept: 'application/json' } }, 10000)
       if (!res.ok) throw new Error(`Failed (${res.status})`)
       const text = await res.text()
-      console.log('[UI] /videos raw response:', text)
+      console.log('[UI] /photos raw response:', text)
       if (!text) {
-        this.videos = []
-        this.selectedVideoId = null
+        this.photos = []
+        this.selectedPhotoId = null
         return
       }
       const data = JSON.parse(text)
-      console.log('[UI] /videos parsed JSON:', data)
+      console.log('[UI] /photos parsed JSON:', data)
       const list = Array.isArray((data as any).files)
         ? (data as any).files
         : Array.isArray(data)
         ? data
         : []
-      console.log('[UI] /videos parsed list', list)
-      this.videos = list.map((item: any, i: number) =>
+      console.log('[UI] /photos parsed list', list)
+      this.photos = list.map((item: any, i: number) =>
         typeof item === 'string'
           ? { id: item, name: item }
-          : { id: String(item.name ?? item.id ?? i), name: String(item.name ?? item.id ?? `Video ${i + 1}`) }
+          : { id: String(item.name ?? item.id ?? i), name: String(item.name ?? item.id ?? `Photo ${i + 1}`) }
       )
-      this.selectedVideoId = this.selectedVideoId ?? this.videos[0]?.id ?? null
+      this.selectedPhotoId = this.selectedPhotoId ?? this.photos[0]?.id ?? null
     } catch (err) {
-      console.error('[UI] /videos error:', err)
+      console.error('[UI] /photos error:', err)
       this.error = err instanceof Error ? err.message : 'Unknown error'
-      this.videos = []
-      this.selectedVideoId = null
+      this.photos = []
+      this.selectedPhotoId = null
     } finally {
       this.loading = false
       this.update()
@@ -80,13 +80,13 @@ class App {
   }
 
   private async takeMedia() {
-    const endpoint = '/video'
+    const endpoint = '/photo'
     try {
       console.log('[UI] Trigger', endpoint)
       const res = await fetchWithTimeout(endpoint, { method: 'POST' }, 15000)
       if (res.status === 202) {
         // Server accepted recording request and is busy recording.
-        this.statusMessage = 'Recording started — the device is busy. File will appear after recording finishes.'
+        this.statusMessage = 'Capture started — the device is busy. File will appear after capture finishes.'
         this.update()
         return
       }
@@ -111,17 +111,17 @@ class App {
   }
 
   private attachMediaListeners() {
-    document.querySelectorAll('[data-video-id]').forEach((el) =>
+    document.querySelectorAll('[data-photo-id]').forEach((el) =>
       el.addEventListener('click', () => {
-        this.selectedVideoId = (el as HTMLElement).dataset.videoId!
+        this.selectedPhotoId = (el as HTMLElement).dataset.photoId!
         this.update()
       })
     )
   }
 
   private render() {
-    const items = this.videos
-    const selectedId = this.selectedVideoId
+    const items = this.photos
+    const selectedId = this.selectedPhotoId
     const selected = items.find((i) => i.id === selectedId)
 
     return `
@@ -135,20 +135,20 @@ class App {
               ${this.statusMessage ? `<p class="status">${this.statusMessage}</p>` : ''}
             </div>
             <div class="hero__actions">
-              <button class="primary" id="btn-take">🎥 Take video</button>
+              <button class="primary" id="btn-take">📸 Take photo</button>
               <button class="secondary" id="btn-refresh" ${this.loading ? 'disabled' : ''}>${this.loading ? 'Refreshing…' : 'Refresh'}</button>
             </div>
           </div>
         </header>
 
         <nav class="tabs">
-          <button class="tab active" id="tab-videos">Videos</button>
+          <button class="tab active" id="tab-photos">Photos</button>
         </nav>
 
         <section class="layout">
           <aside class="panel">
             <div class="panel__header">
-              <h2>Available videos</h2>
+              <h2>Available photos</h2>
               <span class="badge">${items.length}</span>
             </div>
             ${this.loading ? '<p class="muted">Loading…</p>' : ''}
@@ -159,7 +159,7 @@ class App {
                 .map(
                   (item) => `
                 <li>
-                  <button class="video-item ${item.id === selectedId ? 'active' : ''}" data-video-id="${item.id}">
+                  <button class="video-item ${item.id === selectedId ? 'active' : ''}" data-photo-id="${item.id}">
                     <span class="video-name">${item.name}</span>
                     <span class="video-id">${item.id}</span>
                   </button>
@@ -173,19 +173,19 @@ class App {
           <main class="panel">
             <div class="panel__header">
               <h2>Preview</h2>
-              ${selected ? `<a class="primary" href="/video/${encodeURIComponent(selected.id)}" download>Download</a>` : ''}
+              ${selected ? `<a class="primary" href="/photo/${encodeURIComponent(selected.id)}">Open</a>` : ''}
             </div>
             ${
               !selected
-                ? '<div class="empty-state"><p class="muted">Select a recording to download.</p></div>'
+                ? '<div class="empty-state"><p class="muted">Select a photo to preview or open.</p></div>'
                 : `
               <div class="player__body">
                 <div class="player-grid">
                   <div class="player-preview">
-                    <div class="preview-placeholder">Preview disabled (SD card limits). Use the Download button.</div>
+                    <img src="/photo/${encodeURIComponent(selected.id)}" alt="${selected.name}" />
                   </div>
                   <div class="player-actions">
-                    <a class="primary large" href="/video/${encodeURIComponent(selected.id)}" download>Download recording</a>
+                    <a class="primary large" href="/photo/${encodeURIComponent(selected.id)}">Open full</a>
                     <div class="meta" style="margin-top:12px">
                       <div><p class="eyebrow">Title</p><p class="meta__value">${selected.name}</p></div>
                       <div><p class="eyebrow">ID</p><p class="meta__value">${selected.id}</p></div>
