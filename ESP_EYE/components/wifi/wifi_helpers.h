@@ -19,6 +19,9 @@ esp_err_t wifi_helpers_init_sta(const char *ssid, const char *password);
 // Stop and deinitialize Wi-Fi
 esp_err_t wifi_helpers_deinit(void);
 
+// Restart AP (stop/start) to refresh DHCP server and network state
+esp_err_t wifi_helpers_restart_ap(void);
+
 #ifdef __cplusplus
 }
 #endif

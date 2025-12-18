@@ -1,13 +1,9 @@
 #pragma once
 
 #include "esp_err.h"
+#include "esp_camera.h"
 #include <stdbool.h>
 
-// Check if video is currently recording
-bool is_recording(void);
-
-// Check if camera is busy (photo capture or video recording in progress)
-bool is_camera_busy(void);
 
 // Initialize the camera. Returns ESP_OK on success.
 esp_err_t recorder_init(void);
@@ -16,10 +12,16 @@ esp_err_t recorder_init(void);
 esp_err_t recorder_deinit(void);
 
 // Capture image and save to file (camera must be initialized first)
-esp_err_t recorder_capture_to_file(const char *filepath);
+// Pass `frame_size` as a `framesize_t` or -1 to leave unchanged.
+// Pass `jpeg_quality` >= 0 to change quality (higher number = lower quality),
+// or -1 to leave unchanged.
+esp_err_t recorder_capture_to_file(const char *filepath, framesize_t frame_size, int jpeg_quality);
 
-// Start video recording (duration_ms = 0 means indefinite, must call recorder_stop_video to stop)
-esp_err_t recorder_start_video(const char *filepath, uint32_t duration_ms);
+// Request grayscale captures. Note: PIXFORMAT_GRAYSCALE produces raw frames
+// which are not JPEG-compressed by the camera; full support would require
+// encoding raw frames to JPEG. This function returns ESP_ERR_NOT_SUPPORTED
+// on this implementation to avoid producing unusable files.
+esp_err_t recorder_set_grayscale(bool enable);
 
-// Stop video recording
-esp_err_t recorder_stop_video(void);
+
+

@@ -5,6 +5,8 @@
 #include "esp_netif.h"
 #include "esp_err.h"
 #include "nvs_flash.h"
+#include "esp_vfs.h"
+#include "esp_spiffs.h"
 #include "recorder.h"
 #include "wifi_helpers.h"
 #include "sd_card_helpers.h"
@@ -53,16 +55,30 @@ void app_main(void)
 
     /* Mount SD card via SDSPI */
     const char* base_path = "/data";
-    esp_err_t err = sd_card_mount_sdspi(base_path, GPIO_NUM_15, GPIO_NUM_2, GPIO_NUM_14, GPIO_NUM_13);
+    esp_err_t err = sd_card_mount(base_path);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SD mount failed (%s)", esp_err_to_name(err));
-    } else {
-        ESP_LOGI(TAG, "SD card mounted at %s", base_path);
+        ESP_LOGW(TAG, "sd_card_mount failed (%s)", esp_err_to_name(err));
     }
 
-    /* Start file server */
-    ESP_LOGI(TAG, "Starting file server");
-    ESP_ERROR_CHECK(example_start_file_server("/data"));
+    /* Mount SPIFFS for static frontend (stored in flash) */
+    esp_vfs_spiffs_conf_t spiffs_conf = {
+        .base_path = "/spiffs",
+        .partition_label = NULL,
+        .max_files = 5,
+        .format_if_mount_failed = true
+    };
+    esp_err_t spiffs_ret = esp_vfs_spiffs_register(&spiffs_conf);
+    if (spiffs_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to mount SPIFFS (%s)", esp_err_to_name(spiffs_ret));
+    } else {
+        size_t total = 0, used = 0;
+        esp_spiffs_info(NULL, &total, &used);
+        ESP_LOGI(TAG, "SPIFFS mounted at /spiffs (total: %u, used: %u)", total, used);
+    }
+
+    /* Start file server: static frontend from /spiffs, videos on SD at /data */
+    ESP_LOGI(TAG, "Starting file server (static: /spiffs, videos: /data)");
+    ESP_ERROR_CHECK(example_start_file_server("/spiffs", "/data"));
     ESP_LOGI(TAG, "File server at http://192.168.4.1/");
 
     while(1) {

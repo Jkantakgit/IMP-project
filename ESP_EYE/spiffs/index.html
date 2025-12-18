@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Camera Console</title>
+    <script type="module" crossorigin>(function(){const t=document.createElement("link").relList;if(t&&t.supports&&t.supports("modulepreload"))return;for(const s of document.querySelectorAll('link[rel="modulepreload"]'))a(s);new MutationObserver(s=>{for(const e of s)if(e.type==="childList")for(const r of e.addedNodes)r.tagName==="LINK"&&r.rel==="modulepreload"&&a(r)}).observe(document,{childList:!0,subtree:!0});function o(s){const e={};return s.integrity&&(e.integrity=s.integrity),s.referrerPolicy&&(e.referrerPolicy=s.referrerPolicy),s.crossOrigin==="use-credentials"?e.credentials="include":s.crossOrigin==="anonymous"?e.credentials="omit":e.credentials="same-origin",e}function a(s){if(s.ep)return;s.ep=!0;const e=o(s);fetch(s.href,e)}})();function h(u,t,o=8e3){const a=new AbortController,s=setTimeout(()=>a.abort(),o),e={...t||{},signal:a.signal};return fetch(u,e).finally(()=>clearTimeout(s))}class A{photos=[];currentTab="live";loading=!1;error=null;busy=!1;statusMessage=null;constructor(){this.init()}async init(){document.getElementById("root").innerHTML=this.render(),this.attachEventListeners(),await this.loadData()}attachEventListeners(){document.getElementById("tab-live")?.addEventListener("click",()=>{this.currentTab!=="live"&&(this.currentTab="live",this.update())}),document.getElementById("tab-photos")?.addEventListener("click",()=>{this.currentTab!=="photos"&&(this.stopMjpeg(),this.currentTab="photos",this.update())}),document.getElementById("btn-take")?.addEventListener("click",()=>{this.busy||this.takeMedia()}),document.getElementById("btn-refresh-photos")?.addEventListener("click",()=>{this.loadData()})}async loadData(){await this.loadPhotos()}async loadPhotos(){this.loading=!0,this.error=null,this.statusMessage=null,this.update();try{console.log("[UI] Fetching /photos …");const t=await h("/photos",{method:"GET",headers:{Accept:"application/json"}},1e4);if(!t.ok)throw new Error(`Failed (${t.status})`);const o=await t.text();if(console.log("[UI] /photos raw response:",o),!o){this.photos=[];return}const a=JSON.parse(o);console.log("[UI] /photos parsed JSON:",a);const s=Array.isArray(a.files)?a.files:Array.isArray(a)?a:[];console.log("[UI] /photos parsed list",s),this.photos=s.map((e,r)=>typeof e=="string"?{id:e,name:e}:{id:String(e.name??e.id??r),name:String(e.name??e.id??`Photo ${r+1}`)}),this.photos=this.photos.filter((e,r,c)=>c.findIndex(l=>l.id===e.id)===r)}catch(t){console.error("[UI] /photos error:",t),this.error=t instanceof Error?t.message:"Unknown error",this.photos=[]}finally{this.loading=!1,this.update()}}async takeMedia(){const t="/photo";try{console.log("[UI] Trigger",t),this.busy=!0,this.statusMessage="Fetching device time…",this.update();const o=await h("/time",{method:"GET",headers:{Accept:"application/json"}},5e3);if(!o.ok)throw new Error(`Failed to get time (${o.status})`);const s=(await o.json().catch(()=>null))?.time_ms??Date.now();this.statusMessage="Preparing encrypted capture request…",this.update();let e=null;try{const n=await h("/pubkey",{method:"GET",headers:{Accept:"application/json"}},3e3);if(n.ok){const m=(await n.json().catch(()=>null))?.pub;if(m){const w=Uint8Array.from(atob(m),k=>k.charCodeAt(0)),E=await crypto.subtle.importKey("raw",w.buffer,{name:"ECDH",namedCurve:"P-256"},!1,[]),y=await crypto.subtle.generateKey({name:"ECDH",namedCurve:"P-256"},!0,["deriveKey","deriveBits"]),T=await crypto.subtle.exportKey("raw",y.publicKey),C=await crypto.subtle.deriveKey({name:"ECDH",public:E},y.privateKey,{name:"AES-GCM",length:256},!1,["encrypt"]),$=new TextEncoder().encode(`capture:${s}`),g=crypto.getRandomValues(new Uint8Array(12)),d=new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv:g},C,$)),b=16,M=d.slice(0,d.length-b),I=d.slice(d.length-b),L={ephemeral:btoa(String.fromCharCode(...new Uint8Array(T))),iv:btoa(String.fromCharCode(...g)),ct:btoa(String.fromCharCode(...M)),tag:btoa(String.fromCharCode(...I))};e=JSON.stringify(L)}}}catch(n){console.warn("Encryption failed, falling back to plaintext",n)}e||(e=`capture:${s}`);const r=e.startsWith("{")?"application/json":"text/plain",c=await h(t,{method:"POST",headers:{"Content-Type":r},body:e},15e3),l=await c.text();let i=null;try{i=l?JSON.parse(l):null}catch{i=null}if(!c.ok){this.error=i?.reason||`Failed (${c.status})`,this.statusMessage=null,this.busy=!1,this.update();return}const p=i?.status||(c.status===202?"accepted":"ok"),f=i?.path||null;if(p==="rejected"){this.statusMessage=`Rejected: ${i?.reason??"outside window"}`,this.busy=!1,this.update();return}if(p==="scheduled"){this.statusMessage=`Capture scheduled for ${i?.scheduled_for??"future"}`,this.busy=!1,this.update();return}if(f){const n=String(f).split("/").pop()||"";this.statusMessage="Capture accepted — waiting for file to appear...",this.update(),await this.waitForFile(n,12,1e3)?(this.statusMessage="Capture completed",await this.loadData()):this.statusMessage="Capture accepted but file not found yet. Refresh to check."}else await this.loadData();this.busy=!1,this.update()}catch(o){console.error("[UI] trigger error:",o),this.error=o instanceof Error?o.message:"Unknown error",this.statusMessage=null,this.busy=!1,this.update()}}sleep(t){return new Promise(o=>setTimeout(o,t))}async waitForFile(t,o=10,a=1e3){if(!t)return!1;for(let s=0;s<o;s++){try{if(await this.loadPhotos(),this.photos.find(e=>e.id===t||e.name===t))return!0}catch{}await this.sleep(a)}return!1}update(){const t=document.getElementById("root");if(!t)return;const o=window.scrollY;if(t.innerHTML=this.render(),this.attachEventListeners(),window.scrollTo(0,o),this.currentTab==="live"){const a=document.getElementById("mjpeg");a&&!a.src&&(a.src=`http://${location.hostname}:8081/`)}}stopMjpeg(){const t=document.getElementById("mjpeg");if(t)try{t.src="",t.remove()}catch{}}render(){const t=this.photos;return`
+      <div class="page">
+        <header class="hero">
+          <p class="eyebrow">Camera console</p>
+          <div class="hero__row">
+            <div>
+              <h1>Photo library</h1>
+              <p class="subhead">Browse and download photos from your device (download-only).</p>
+              ${this.statusMessage?`<p class="status">${this.statusMessage}</p>`:""}
+            </div>
+          </div>
+        </header>
+
+        <nav class="tabs">
+          <button class="tab ${this.currentTab==="live"?"active":""}" id="tab-live">Live</button>
+          <button class="tab ${this.currentTab==="photos"?"active":""}" id="tab-photos">Photos</button>
+        </nav>
+
+        ${this.currentTab==="live"?`
+          <section class="layout">
+            <main class="panel">
+              <div class="panel__header"><h2>Live stream</h2>
+                <div class="hero__actions">
+                  <button class="primary" id="btn-take">📸 Take photo</button>
+                </div>
+              </div>
+              <div class="player__body"><div class="player-grid"><div class="player-preview">
+                <img id="mjpeg" src="http://${location.hostname}:8081/" alt="Live stream" style="max-width:100%;height:auto;"/>
+              </div></div></div>
+            </main>
+          </section>
+        `:`
+          <section class="layout">
+            <main class="panel">
+              <div class="panel__header">
+                <h2>Available photos</h2>
+                <span class="badge">${t.length}</span>
+                <div style="float:right">
+                  <button class="secondary" id="btn-refresh-photos">Refresh</button>
+                </div>
+              </div>
+              ${this.loading?'<p class="muted">Loading…</p>':""}
+              ${this.error?`<p class="error">${this.error}</p>`:""}
+              ${!this.loading&&!this.error&&t.length===0?'<p class="muted">No items found.</p>':""}
+              <ul class="photo-list">
+                ${t.map(o=>`
+                    <li>
+                      <a class="photo-link" href="/photo/${encodeURIComponent(o.id)}">${o.name}</a>
+                    </li>
+                  `).join("")}
+              </ul>
+            </main>
+          </section>
+        `}
+      </div>
+    `}}new A;</script>
+    <style rel="stylesheet" crossorigin>:root{--bg:#f4f6fb;--panel:#ffffff;--muted:#6b7280;--border:#e6e9ef;--text:#0f1724;--primary:#2563eb;--accent:#1e40af;--danger:#dc2626}*{box-sizing:border-box}body{background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica Neue,Arial,sans-serif;margin:0}.page{max-width:1100px;margin:0 auto;padding:1.25rem}.hero{background:var(--panel);border:1px solid var(--border);padding:1rem;margin-bottom:1rem;border-radius:8px}.hero__row{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;align-items:center}.hero__actions{display:flex;gap:.5rem}h1{font-size:1.5rem;margin:0;color:var(--text)}h2{font-size:1.05rem;margin:0}.subhead{color:var(--muted);font-size:.95rem;margin-top:.25rem}.eyebrow{text-transform:uppercase;font-size:.75rem;color:var(--muted);letter-spacing:.04em}.tabs{display:flex;gap:.5rem;border-bottom:1px solid var(--border);padding-bottom:.5rem;margin-bottom:1rem}.tab{background:none;border:none;color:var(--muted);padding:.5rem 1rem;cursor:pointer;border-bottom:3px solid transparent;font-weight:600}.tab.active{color:var(--primary);border-color:var(--primary)}.layout{display:grid;grid-template-columns:300px 1fr;gap:1rem}.panel{background:var(--panel);border:1px solid var(--border);padding:1rem;border-radius:8px}.panel__header{display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem}.badge{background:var(--primary);color:#fff;padding:.2rem .6rem;border-radius:999px;font-size:.8rem}.video-list{list-style:none;padding:0;margin:0}.video-item{width:100%;display:flex;align-items:center;justify-content:space-between;text-align:left;padding:.65rem;border:1px solid var(--border);background:transparent;margin-bottom:.5rem;border-radius:6px;cursor:pointer}.video-item:hover{background:#f3f6ff}.video-item.active{border-color:var(--primary);background:#eef4ff}.video-name{display:block;font-weight:600}.video-id{color:var(--muted);font-size:.85rem}.player__body{margin-top:.5rem}.player-grid{display:flex;gap:1rem;align-items:flex-start}.player-preview{flex:1}.preview-placeholder{background:#f8fafc;border:1px solid var(--border);padding:2rem;border-radius:8px;color:var(--muted);text-align:center}.player-actions{width:260px;display:flex;flex-direction:column;gap:.75rem}video,img{width:100%;border:1px solid var(--border);background:#000;border-radius:6px}.meta{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:.75rem}.meta__value{font-weight:600}.muted{color:var(--muted)}.error{color:var(--danger);font-weight:700}.empty-state{border:1px dashed var(--border);padding:2rem;text-align:center;border-radius:8px;background:linear-gradient(180deg,#fff,#fbfbff)}.hero__actions .primary,.primary{background:var(--primary);color:#fff;border:none;padding:.5rem .8rem;border-radius:6px;cursor:pointer;font-weight:600}.status{margin-top:.5rem;color:var(--accent);font-weight:600}.secondary{background:transparent;border:1px solid var(--border);padding:.45rem .7rem;border-radius:6px;cursor:pointer;color:var(--accent);font-weight:600}.primary:focus,.secondary:focus,.video-item:focus{outline:3px solid rgba(37,99,235,.15);outline-offset:2px}@media(max-width:768px){.layout{grid-template-columns:1fr}.hero__row{flex-direction:column;align-items:flex-start}.hero__actions{width:100%;justify-content:flex-start}}</style>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
