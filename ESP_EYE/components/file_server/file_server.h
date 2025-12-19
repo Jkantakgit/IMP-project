@@ -1,7 +1,24 @@
 #pragma once
 
 #include "esp_err.h"
+#include "esp_log.h"
+#include "recorder.h"
+#include "esp_timer.h"
+#include "esp_camera.h"
+#include "freertos/task.h"
+#include "esp_http_server.h"
+#include "freertos/FreeRTOS.h"
 
+
+#include <stdio.h>
+#include <time.h>
+#include <ctype.h>
+#include <string.h>
+#include <dirent.h>
+#include <stdint.h>
+#include <sys/time.h>
+#include <sys/stat.h>
+#include <sys/param.h>
 
 /**
  * @brief Start the file server

@@ -20,8 +20,12 @@ static const char *TAG = "mjpeg_tcp";
 #define BACKLOG 1
 #define FRAME_DELAY_MS 100
 
-static void mjpeg_client_handler(int client_sock)
-{
+/**
+ * @brief Handle a connected MJPEG client
+ * 
+ * @param client_sock Socket descriptor for the connected client
+ */
+static void mjpeg_client_handler(int client_sock){
     const char *hdr = "HTTP/1.0 200 OK\r\n"
                       "Server: esp32-mjpeg\r\n"
                       "Cache-Control: no-cache\r\n"
@@ -83,8 +87,12 @@ static void mjpeg_client_handler(int client_sock)
     close(client_sock);
 }
 
-static void mjpeg_tcp_server_task(void *arg)
-{
+/**
+ * @brief MJPEG TCP server task
+ * 
+ * @param arg 
+ */
+static void mjpeg_tcp_server_task(void *arg){
     (void)arg;
     int listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (listen_sock < 0) {
@@ -136,8 +144,11 @@ static void mjpeg_tcp_server_task(void *arg)
     vTaskDelete(NULL);
 }
 
-void mjpeg_tcp_server_start(void)
-{
+/**
+ * @brief Start the MJPEG TCP server
+ * 
+ */
+void mjpeg_tcp_server_start(void){
     /* Create the TCP server task on its own stack and priority */
     if (xTaskCreate(mjpeg_tcp_server_task, "mjpeg_tcp", 12 * 1024, NULL, tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create MJPEG TCP server task");

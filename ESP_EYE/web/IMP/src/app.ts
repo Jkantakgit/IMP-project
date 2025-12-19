@@ -16,6 +16,8 @@ class App {
   private error: string | null = null
   private busy = false
   private statusMessage: string | null = null
+  // device_time_ms - local Date.now()
+  private clientTimeOffsetMs: number | null = null
 
   constructor() {
     this.init()
@@ -24,31 +26,83 @@ class App {
   private async init() {
     document.getElementById('root')!.innerHTML = this.render()
     this.attachEventListeners()
-    await this.loadData()
+    // Sync device time and learn device offset on page load so reloads work
+    void this.syncTime()
+    try { await this.fetchDeviceTime() } catch (_) {}
   }
 
   private attachEventListeners() {
-    // Single-tab UI; no tab switching required
-    // Tab switching handlers
     document.getElementById('tab-live')?.addEventListener('click', () => {
       if (this.currentTab === 'live') return
       this.currentTab = 'live'
+      // When switching to Live, ask the device to sync its clock
+      void this.syncTime()
       this.update()
     })
     document.getElementById('tab-photos')?.addEventListener('click', () => {
       if (this.currentTab === 'photos') return
-      // stop MJPEG stream before switching away so the browser/socket is freed
       this.stopMjpeg()
       this.currentTab = 'photos'
       this.update()
     })
     document.getElementById('btn-take')?.addEventListener('click', () => { if (!this.busy) void this.takeMedia() })
-    document.getElementById('btn-refresh-photos')?.addEventListener('click', () => { void this.loadData() })
+    document.getElementById('btn-refresh-photos')?.addEventListener('click', () => { void this.loadPhotos() })
   }
 
 
-  private async loadData() {
-    await this.loadPhotos()
+
+  private async fetchPhotosList() {
+    const res = await fetchWithTimeout('/photos', { method: 'GET', headers: { Accept: 'application/json' } }, 10000)
+    if (!res.ok) throw new Error(`Failed (${res.status})`)
+    const text = await res.text()
+    if (!text) return []
+    const data = JSON.parse(text)
+    const list = Array.isArray((data as any).files)
+      ? (data as any).files
+      : Array.isArray(data)
+      ? data
+      : []
+    // Normalize to array of filename strings
+    return list.map((item: any, i: number) => (typeof item === 'string' ? item : String(item.name ?? item.id ?? i)))
+  }
+
+  private _photosCache: { ts: number; list: string[] } | null = null
+
+  private async syncTime() {
+    try {
+      this.statusMessage = 'Syncing device time…'
+      this.update()
+      const payload = { time_ms: Date.now() }
+      const res = await fetchWithTimeout('/time', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, 5000)
+      if (!res.ok) throw new Error(`Failed to sync (${res.status})`)
+      // after posting, refresh device time offset
+      try { await this.fetchDeviceTime() } catch (_) {}
+      // briefly show success
+      this.statusMessage = 'Device time synced'
+      this.update()
+      await this.sleep(800)
+      this.statusMessage = null
+      this.update()
+    } catch (err) {
+      this.statusMessage = err instanceof Error ? `Time sync failed: ${err.message}` : 'Time sync failed'
+      this.update()
+      // keep the message for a short time so user notices
+      await this.sleep(1500)
+      this.statusMessage = null
+      this.update()
+    }
+  }
+
+  private async fetchDeviceTime() {
+    const timeRes = await fetchWithTimeout('/time', { method: 'GET', headers: { Accept: 'application/json' } }, 5000)
+    if (!timeRes.ok) throw new Error(`Failed to get time (${timeRes.status})`)
+    const timeJson = await timeRes.json().catch(() => null)
+    const deviceTime = timeJson?.time_ms
+    if (typeof deviceTime === 'number') {
+      this.clientTimeOffsetMs = deviceTime - Date.now()
+    } else {
+      throw new Error('Invalid /time response')
+    }
   }
 
   private async loadPhotos() {
@@ -58,32 +112,17 @@ class App {
     this.update()
 
     try {
-      console.log('[UI] Fetching /photos …')
-      const res = await fetchWithTimeout('/photos', { method: 'GET', headers: { Accept: 'application/json' } }, 10000)
-      if (!res.ok) throw new Error(`Failed (${res.status})`)
-      const text = await res.text()
-      console.log('[UI] /photos raw response:', text)
-      if (!text) {
-        this.photos = []
-        return
-      }
-      const data = JSON.parse(text)
-      console.log('[UI] /photos parsed JSON:', data)
-      const list = Array.isArray((data as any).files)
-        ? (data as any).files
-        : Array.isArray(data)
-        ? data
-        : []
-      console.log('[UI] /photos parsed list', list)
-      this.photos = list.map((item: any, i: number) =>
-        typeof item === 'string'
-          ? { id: item, name: item }
-          : { id: String(item.name ?? item.id ?? i), name: String(item.name ?? item.id ?? `Photo ${i + 1}`) }
-      )
-      // Deduplicate entries (some FAT implementations may list files twice)
+      const list = await this.fetchPhotosList()
+      // Map to MediaItem and create human-readable name: replace 'x'->' ' and '_'->':'
+      this.photos = list.map((fname: string) => {
+        const id = String(fname)
+        const base = id.replace(/\.jpg$/i, '')
+        const display = base.replace(/x/g, ' ').replace(/_/g, ':')
+        return { id, name: display }
+      })
+      // Deduplicate entries
       this.photos = this.photos.filter((p, idx, arr) => arr.findIndex(x => x.id === p.id) === idx)
     } catch (err) {
-      console.error('[UI] /photos error:', err)
       this.error = err instanceof Error ? err.message : 'Unknown error'
       this.photos = []
     } finally {
@@ -95,16 +134,22 @@ class App {
   private async takeMedia() {
     const endpoint = '/photo'
     try {
-      console.log('[UI] Trigger', endpoint)
       this.busy = true
       this.statusMessage = 'Fetching device time…'
       this.update()
 
-      // First query device time so we can include a capture timestamp
-      const timeRes = await fetchWithTimeout('/time', { method: 'GET', headers: { Accept: 'application/json' } }, 5000)
-      if (!timeRes.ok) throw new Error(`Failed to get time (${timeRes.status})`)
-      const timeJson = await timeRes.json().catch(() => null)
-      const deviceTime = timeJson?.time_ms ?? Date.now()
+      // Determine device-aligned timestamp to send. Prefer cached offset
+      // so reloads behave consistently; fall back to querying /time.
+      let deviceTime: number
+      if (this.clientTimeOffsetMs !== null) {
+        deviceTime = Date.now() + this.clientTimeOffsetMs
+      } else {
+        const timeRes = await fetchWithTimeout('/time', { method: 'GET', headers: { Accept: 'application/json' } }, 5000)
+        if (!timeRes.ok) throw new Error(`Failed to get time (${timeRes.status})`)
+        const timeJson = await timeRes.json().catch(() => null)
+        deviceTime = timeJson?.time_ms ?? Date.now()
+        if (typeof deviceTime === 'number') this.clientTimeOffsetMs = deviceTime - Date.now()
+      }
 
       this.statusMessage = 'Preparing capture request…'
       this.update()
@@ -152,18 +197,18 @@ class App {
         const found = await this.waitForFile(filename, 12, 1000)
         if (found) {
           this.statusMessage = 'Capture completed'
-          await this.loadData()
+          // Only refresh UI photos if user is viewing the Photos tab
+          if (this.currentTab === 'photos') await this.loadPhotos()
         } else {
           this.statusMessage = 'Capture accepted but file not found yet. Refresh to check.'
         }
       } else {
         // no path returned — just refresh
-        await this.loadData()
+        if (this.currentTab === 'photos') await this.loadPhotos()
       }
       this.busy = false
       this.update()
     } catch (err) {
-      console.error('[UI] trigger error:', err)
       this.error = err instanceof Error ? err.message : 'Unknown error'
       this.statusMessage = null
       this.busy = false
@@ -173,12 +218,20 @@ class App {
 
   private sleep(ms: number) { return new Promise(resolve => setTimeout(resolve, ms)) }
 
-  private async waitForFile(filename: string, attempts = 10, delayMs = 1000) {
+  private async waitForFile(filename: string, attempts = 6, delayMs = 2000) {
     if (!filename) return false
     for (let i = 0; i < attempts; i++) {
       try {
-        await this.loadPhotos()
-        if (this.photos.find(p => p.id === filename || p.name === filename)) return true
+        // honor cache to reduce load
+        const now = Date.now()
+        let list: string[]
+        if (this._photosCache && now - this._photosCache.ts < 5000) {
+          list = this._photosCache.list
+        } else {
+          list = await this.fetchPhotosList()
+          this._photosCache = { ts: now, list }
+        }
+        if (list.find((f: string) => f === filename)) return true
       } catch (_) {}
       await this.sleep(delayMs)
     }
@@ -205,14 +258,8 @@ class App {
     try {
       img.src = ''
       img.remove()
-    } catch (e) {
-      // ignore DOM removal errors
-    }
+    } catch (e) {}
   }
-
-  // No per-photo selection or preview — Photos tab is download-only
-
-  
 
   private render() {
     const items = this.photos
