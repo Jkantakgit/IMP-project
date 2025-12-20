@@ -1,43 +1,48 @@
-/**
- * @file file_server.c
- * @author xholanp00
- * @brief Http server for serving static files and handling picture capture requests
- * 
- */
+/* Simple HTTP file server - serves static files from SD card */
 
-#include "file_server.h"
+#include <stdio.h>
+#include <string.h>
+#include <sys/param.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <time.h>
+#include <sys/time.h>
+#include <ctype.h>
 
+#include "esp_err.h"
+#include "esp_log.h"
+#include "esp_http_server.h"
+#include "esp_timer.h"
+#include <stdint.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "recorder.h"
+#include "esp_camera.h"
 
 #define FILE_PATH_MAX 1024
-#define SCRATCH_BUFSIZE 16384
+#define SCRATCH_BUFSIZE 16384   // 16KB chunk for faster downloads; PSRAM available
 
-// Data structure to hold server context
 struct file_server_data {
     char static_base[128];
     char media_base[128];
     char scratch[SCRATCH_BUFSIZE];
 };
 
-// Global time offset in milliseconds
+/* Time offset (ms) to translate external epoch time to device relative time.
+   current_time_ms() = esp_timer_get_time()/1000 + g_time_offset_ms */
 static int64_t g_time_offset_ms = 0;
 
-// Capture request acceptance window in milliseconds
+/* Accept capture commands only if requested capture time is within this window
+    (milliseconds) of the device's synced time. Prevents accepting stale/late
+    triggers from remote PIR device. */
 #ifndef CAPTURE_ACCEPT_WINDOW_MS
 #define CAPTURE_ACCEPT_WINDOW_MS 5000
 #endif
 
-// Tag for logging
 static const char *TAG = "file_server";
 
-/**
- * @brief Ensure that a subdirectory exists within the base path
- * 
- * @param base_path Base directory path
- * @param subdir Subdirectory name to ensure
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-static esp_err_t ensure_subdir(const char *base_path, const char *subdir){
-
+static esp_err_t ensure_subdir(const char *base_path, const char *subdir)
+{
     char dirpath[FILE_PATH_MAX];
     int needed = snprintf(dirpath, sizeof(dirpath), "%s/%s", base_path, subdir);
     if (needed < 0 || needed >= (int)sizeof(dirpath)) {
@@ -61,14 +66,9 @@ static esp_err_t ensure_subdir(const char *base_path, const char *subdir){
     return ESP_OK;
 }
 
-/**
- * @brief Handle POST requests to set the current time
- * 
- * @param req HTTP request object
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-static esp_err_t time_post_handler(httpd_req_t *req){
 
+static esp_err_t time_post_handler(httpd_req_t *req)
+{
     int content_len = req->content_len;
     if (content_len <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing body");
@@ -110,24 +110,27 @@ static esp_err_t time_post_handler(httpd_req_t *req){
     }
     uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
     g_time_offset_ms = (int64_t)ts - (int64_t)now_ms;
+    ESP_LOGI(TAG, "Time sync set: remote=%llu now=%llu offset=%lld", ts, (unsigned long long)now_ms, (long long)g_time_offset_ms);
+    // Also set the system clock so libc time functions (localtime, strftime)
+    // reflect the synced real time.
     struct timeval tv;
     tv.tv_sec = (time_t)(ts / 1000ULL);
     tv.tv_usec = (suseconds_t)((ts % 1000ULL) * 1000ULL);
-    settimeofday(&tv, NULL);
+    if (settimeofday(&tv, NULL) == 0) {
+        ESP_LOGI(TAG, "System time set to %llu (s)", (unsigned long long)tv.tv_sec);
+    } else {
+        ESP_LOGW(TAG, "settimeofday failed");
+    }
     free(buf);
     httpd_resp_set_type(req, "application/json");
     char resp[128];
     snprintf(resp, sizeof(resp), "{\"status\":\"ok\",\"offset_ms\":%lld}", (long long)g_time_offset_ms);
-    httpd_resp_send(req, resp, strlen(resp));
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_sendstr(req, resp);
     return ESP_OK;
 }
 
-/**
- * @brief Handle GET requests to retrieve the current time
- * 
- * @param req HTTP request object
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
+/* GET /time - return device's current synced epoch ms as JSON */
 static esp_err_t time_get_handler(httpd_req_t *req){
     // Get current time with offset
     uint64_t now_ms_rel = (uint64_t)(esp_timer_get_time() / 1000);
@@ -141,37 +144,60 @@ static esp_err_t time_get_handler(httpd_req_t *req){
     return ESP_OK;
 }
 
-/**
- * @brief Handle GET requests for the favicon
- * 
- * @param req HTTP request object
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-static esp_err_t favicon_get_handler(httpd_req_t *req){
+
+static void list_files_in_directory(const char *path)
+{
+    DIR *dir = opendir(path);
+    if (!dir) {
+        ESP_LOGE(TAG, "Failed to open directory: %s", path);
+        return;
+    }
+
+    ESP_LOGI(TAG, "=== Files in %s ===", path);
+    struct dirent *entry;
+    int file_count = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        struct stat entry_stat;
+        char filepath[512];
+        snprintf(filepath, sizeof(filepath), "%s/%s", path, entry->d_name);
+        
+        if (stat(filepath, &entry_stat) == 0) {
+            const char *type = (entry->d_type == DT_DIR) ? "DIR " : "FILE";
+            ESP_LOGI(TAG, "  %s: %s (%ld bytes)", type, entry->d_name, entry_stat.st_size);
+            file_count++;
+        } else {
+            ESP_LOGW(TAG, "  ??: %s (stat failed)", entry->d_name);
+        }
+    }
+    closedir(dir);
+    ESP_LOGI(TAG, "=== Total: %d items ===", file_count);
+}
+
+static esp_err_t favicon_get_handler(httpd_req_t *req)
+{
     httpd_resp_set_status(req, "204 No Content");
     httpd_resp_send(req, NULL, 0);
     return ESP_OK;
 }
 
-/**
- * @brief Handle POST requests to capture a picture
- * A picture will be captured if the content contains a valid capture time within the acceptable window.
- * 
- * @param req HTTP request object
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-static esp_err_t picture_post_handler(httpd_req_t *req){
-    // Get server data from user context
+static esp_err_t picture_post_handler(httpd_req_t *req)
+{
     struct file_server_data *server_data = (struct file_server_data *)req->user_ctx;
 
     char filepath[FILE_PATH_MAX * 2];
     char pictures_dir[FILE_PATH_MAX];
 
+    /* Ensure pictures directory exists under media base */
     if (ensure_subdir(server_data->media_base, "pictures") != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to ensure pictures directory under media base %s", server_data->media_base);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to create directory");
         return ESP_FAIL;
     }
     snprintf(pictures_dir, sizeof(pictures_dir), "%s/pictures", server_data->media_base);
+    
+    /* Require a body containing `capture:<epoch_ms>`; reject other requests.
+       This enforces that remote triggers provide a timestamp that we can
+       validate against the device clock (safety window). */
     int content_len = req->content_len;
     if (content_len <= 0) {
         httpd_resp_set_status(req, "400 Bad Request");
@@ -194,6 +220,9 @@ static esp_err_t picture_post_handler(httpd_req_t *req){
         return ESP_FAIL;
     }
     body[r] = '\0';
+    body[r] = '\0';
+
+    /* Expect plaintext body containing `capture:<epoch_ms>` */
 
     char *p = strstr(body, "capture:");
     if (!p) {
@@ -211,6 +240,8 @@ static esp_err_t picture_post_handler(httpd_req_t *req){
     uint64_t ts_now = now_ms_rel + (uint64_t)g_time_offset_ms;
     int64_t diff = (int64_t)capture_time - (int64_t)ts_now;
     if (llabs(diff) > (int64_t)CAPTURE_ACCEPT_WINDOW_MS) {
+        ESP_LOGW(TAG, "Rejected capture; requested %llu now %llu diff %lld ms > window %d ms",
+                 (unsigned long long)capture_time, (unsigned long long)ts_now, (long long)diff, CAPTURE_ACCEPT_WINDOW_MS);
         free(body);
         httpd_resp_set_status(req, "403 Forbidden");
         httpd_resp_set_type(req, "application/json");
@@ -220,6 +251,9 @@ static esp_err_t picture_post_handler(httpd_req_t *req){
         return ESP_OK;
     }
 
+    /* Within window — enqueue an async capture where filename uses the
+       requested capture_time to make it deterministic for the caller.
+       Use local calendar date/time (YYYY-MM-DD_HH:MM:SS) as requested. */
     time_t sec = (time_t)(capture_time / 1000ULL);
     struct tm tm;
     localtime_r(&sec, &tm);
@@ -240,6 +274,8 @@ static esp_err_t picture_post_handler(httpd_req_t *req){
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Server OOM");
         return ESP_FAIL;
     }
+    ESP_LOGI(TAG, "Accepted capture within window, enqueuing: %s", task_filepath);
+    extern esp_err_t recorder_enqueue_capture(char *filepath);
     if (recorder_enqueue_capture(task_filepath) != ESP_OK) {
         free(task_filepath);
         ESP_LOGE(TAG, "Failed to enqueue capture");
@@ -264,15 +300,9 @@ static esp_err_t picture_post_handler(httpd_req_t *req){
     return ESP_OK;
 }
 
-/**
- * @brief Handle GET requests to list files in a directory
- * 
- * @param req HTTP request object
- * @param subdir Subdirectory to list
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-static esp_err_t list_directory_handler(httpd_req_t *req, const char *subdir){
 
+static esp_err_t list_directory_handler(httpd_req_t *req, const char *subdir)
+{
     struct file_server_data *server_data = (struct file_server_data *)req->user_ctx;
     char dirpath[FILE_PATH_MAX];
     snprintf(dirpath, sizeof(dirpath), "%s/%s", server_data->media_base, subdir);
@@ -291,11 +321,13 @@ static esp_err_t list_directory_handler(httpd_req_t *req, const char *subdir){
 
     struct dirent *entry;
     int first = 1;
+    int sent = 0;
     while ((entry = readdir(dir)) != NULL) {
         struct stat file_stat;
         char filepath[FILE_PATH_MAX * 2];
         snprintf(filepath, sizeof(filepath), "%s/%s", dirpath, entry->d_name);
 
+        // FATFS doesn't reliably set d_type; use stat to decide
         if (stat(filepath, &file_stat) == 0 && S_ISREG(file_stat.st_mode)) {
             if (!first) {
                 httpd_resp_sendstr_chunk(req, ",");
@@ -306,25 +338,24 @@ static esp_err_t list_directory_handler(httpd_req_t *req, const char *subdir){
                      entry->d_name, file_stat.st_size);
             httpd_resp_sendstr_chunk(req, file_json);
             first = 0;
+            sent++;
+            if (sent <= 4) {
+                ESP_LOGI(TAG, "%s file: %s (%ld bytes)", subdir, entry->d_name, file_stat.st_size);
+            }
         }
     }
     closedir(dir);
     
-    httpd_resp_sendstr_chunk(req, "]}" );
+    httpd_resp_sendstr_chunk(req, "]}");
+    ESP_LOGI(TAG, "%s response count=%d", subdir, sent);
+
+    /* Terminate chunked response */
     httpd_resp_sendstr_chunk(req, NULL);
     return ESP_OK;
 }
 
-
-/**
- * @brief Handle GET requests to retrieve a photo by ID
- * Used for downloading captured photos.
- * 
- * @param req HTTP request object
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-static esp_err_t photo_get_handler(httpd_req_t *req){
-
+static esp_err_t photo_get_handler(httpd_req_t *req)
+{
     struct file_server_data *server_data = (struct file_server_data *)req->user_ctx;
     const char *uri = req->uri;
     const char *id = uri;
@@ -341,17 +372,19 @@ static esp_err_t photo_get_handler(httpd_req_t *req){
 
     struct stat file_stat;
     if (stat(filepath, &file_stat) == -1) {
+        ESP_LOGE(TAG, "Photo file not found: %s", filepath);
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Photo not found");
         return ESP_FAIL;
     }
 
     FILE *fd = fopen(filepath, "r");
     if (!fd) {
+        ESP_LOGE(TAG, "Failed to open photo: %s", filepath);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to open photo");
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Serving photo: %s", id);
+    ESP_LOGI(TAG, "Serving photo: %s (%ld bytes)", id, file_stat.st_size);
     httpd_resp_set_type(req, "image/jpeg");
     httpd_resp_set_hdr(req, "Content-Disposition", "attachment");
     httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=3600");
@@ -376,23 +409,12 @@ static esp_err_t photo_get_handler(httpd_req_t *req){
     return ESP_OK;
 }
 
-/**
- * @brief Handle GET requests to list all photos
- * 
- * @param req HTTP request object
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-static esp_err_t photos_get_handler(httpd_req_t *req){
+static esp_err_t photos_get_handler(httpd_req_t *req)
+{
     return list_directory_handler(req, "pictures");
 }
 
-/**
- * @brief Handle GET requests to the /photo root
- * Provides usage information for the /photo endpoint.
- * 
- * @param req HTTP request object
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
+/* Simple informative handler for GET /photo (root) */
 static esp_err_t photo_root_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
@@ -401,6 +423,8 @@ static esp_err_t photo_root_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* Stub handler for /video when HTTP streaming is not provided by httpd.
+   We serve MJPEG via standalone TCP streamer on port 8081; inform clients. */
 static esp_err_t mjpeg_stream_handler(httpd_req_t *req)
 {
     httpd_resp_set_status(req, "503 Service Unavailable");
@@ -411,17 +435,12 @@ static esp_err_t mjpeg_stream_handler(httpd_req_t *req)
 }
 
 
+
 #define IS_FILE_EXT(filename, ext) \
     (strcasecmp(&filename[strlen(filename) - sizeof(ext) + 1], ext) == 0)
 
-/**
- * @brief Set the content type from file object
- * 
- * @param req HTTP request object
- * @param filename Name of the file
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-static esp_err_t set_content_type_from_file(httpd_req_t *req, const char *filename){
+static esp_err_t set_content_type_from_file(httpd_req_t *req, const char *filename)
+{
     if (IS_FILE_EXT(filename, ".html")) {
         return httpd_resp_set_type(req, "text/html");
     } else if (IS_FILE_EXT(filename, ".css")) {
@@ -438,14 +457,8 @@ static esp_err_t set_content_type_from_file(httpd_req_t *req, const char *filena
     return httpd_resp_set_type(req, "text/plain");
 }
 
-/**
- * @brief Handle GET requests to serve static files
- * 
- * @param req HTTP request object
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-static esp_err_t file_get_handler(httpd_req_t *req){
-
+static esp_err_t file_get_handler(httpd_req_t *req)
+{
     char filepath[FILE_PATH_MAX];
     struct file_server_data *server_data = (struct file_server_data *)req->user_ctx;
     
@@ -500,14 +513,8 @@ static esp_err_t file_get_handler(httpd_req_t *req){
     return ESP_OK;
 }
 
-/**
- * @brief Start the file server
- * 
- * @param static_base_path Base path for static files
- * @param photos_base_path Base path for photos
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-esp_err_t example_start_file_server(const char *static_base_path, const char *photos_base_path){
+esp_err_t example_start_file_server(const char *static_base_path, const char *photos_base_path)
+{
     static struct file_server_data *server_data = NULL;
 
     if (server_data) {
@@ -530,12 +537,21 @@ esp_err_t example_start_file_server(const char *static_base_path, const char *ph
         strlcpy(server_data->media_base, "/data", sizeof(server_data->media_base));
     }
 
-    // Configure and start the HTTP server
+    ESP_LOGI(TAG, "Media base set to: %s", server_data->media_base);
+
+    /* Ensure media directories exist */
+    ensure_subdir(server_data->media_base, "pictures");
+
+    /* List all files in the media base path for debugging */
+    list_files_in_directory(server_data->media_base);
+
     httpd_handle_t server = NULL;
      httpd_config_t config = HTTPD_DEFAULT_CONFIG();
      config.uri_match_fn = httpd_uri_match_wildcard;
-     config.stack_size = 16384;
-     config.task_priority = 5;
+     /* Increase stack for streaming and raise server task priority so MJPEG
+         streaming is less likely to block other handlers. */
+     config.stack_size = 16384;   // larger stack for MJPEG streaming
+     config.task_priority = 5;    // moderate priority
      config.lru_purge_enable = true;
      config.max_uri_handlers = 16;
      config.recv_wait_timeout = 20;
@@ -549,11 +565,12 @@ esp_err_t example_start_file_server(const char *static_base_path, const char *ph
         return ESP_FAIL;
     }
 
-    // Start MJPEG TCP server
+    /* Start standalone MJPEG TCP streamer (port 8081) so streaming cannot
+       block the main HTTP server handlers. */
     extern void mjpeg_tcp_server_start(void);
     mjpeg_tcp_server_start();
 
-    // Register URI handlers
+    /* Favicon handler (no-op) - register before wildcard */
     httpd_uri_t favicon = {
         .uri = "/favicon.ico",
         .method = HTTP_GET,
@@ -562,6 +579,7 @@ esp_err_t example_start_file_server(const char *static_base_path, const char *ph
     };
     httpd_register_uri_handler(server, &favicon);
 
+    /* Picture capture handler (POST to /photo) */
     httpd_uri_t photo_post = {
         .uri = "/photo",
         .method = HTTP_POST,
@@ -570,6 +588,7 @@ esp_err_t example_start_file_server(const char *static_base_path, const char *ph
     };
     httpd_register_uri_handler(server, &photo_post);
 
+    /* Photos list handler */
     httpd_uri_t photos = {
         .uri = "/photos",
         .method = HTTP_GET,
@@ -578,6 +597,7 @@ esp_err_t example_start_file_server(const char *static_base_path, const char *ph
     };
     httpd_register_uri_handler(server, &photos);
 
+    /* Time sync handler (POST /time) */
     httpd_uri_t time_post = {
         .uri = "/time",
         .method = HTTP_POST,
@@ -586,6 +606,7 @@ esp_err_t example_start_file_server(const char *static_base_path, const char *ph
     };
     httpd_register_uri_handler(server, &time_post);
 
+    /* Time query handler (GET /time) - return device time for clients */
     httpd_uri_t time_get = {
         .uri = "/time",
         .method = HTTP_GET,
@@ -594,6 +615,9 @@ esp_err_t example_start_file_server(const char *static_base_path, const char *ph
     };
     httpd_register_uri_handler(server, &time_get);
 
+    /* (encryption removed) */
+
+    /* Photo download handler (GET /photo/{id}) */
     httpd_uri_t photo_get = {
         .uri = "/photo/*",
         .method = HTTP_GET,
@@ -602,6 +626,7 @@ esp_err_t example_start_file_server(const char *static_base_path, const char *ph
     };
     httpd_register_uri_handler(server, &photo_get);
 
+    /* Photo root handler (GET /photo) to guide clients */
     httpd_uri_t photo_root_get = {
         .uri = "/photo",
         .method = HTTP_GET,
@@ -610,6 +635,7 @@ esp_err_t example_start_file_server(const char *static_base_path, const char *ph
     };
     httpd_register_uri_handler(server, &photo_root_get);
 
+    /* MJPEG stream handler (real-time) */
     httpd_uri_t mjpeg = {
         .uri = "/video",
         .method = HTTP_GET,
@@ -618,6 +644,7 @@ esp_err_t example_start_file_server(const char *static_base_path, const char *ph
     };
     httpd_register_uri_handler(server, &mjpeg);
 
+    /* Root handler */
     httpd_uri_t root = {
         .uri = "/",
         .method = HTTP_GET,
@@ -626,6 +653,7 @@ esp_err_t example_start_file_server(const char *static_base_path, const char *ph
     };
     httpd_register_uri_handler(server, &root);
 
+    /* Wildcard handler for all files - MUST BE LAST */
     httpd_uri_t file_handler = {
         .uri = "/*",
         .method = HTTP_GET,

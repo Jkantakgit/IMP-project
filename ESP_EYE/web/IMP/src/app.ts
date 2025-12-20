@@ -270,8 +270,7 @@ class App {
           <p class="eyebrow">Camera console</p>
           <div class="hero__row">
             <div>
-              <h1>Photo library</h1>
-              <p class="subhead">Browse and download photos from your device (download-only).</p>
+              <h1>Secure System with motion detection</h1>
               ${this.statusMessage ? `<p class="status">${this.statusMessage}</p>` : ''}
             </div>
           </div>
@@ -287,7 +286,7 @@ class App {
             <main class="panel">
               <div class="panel__header"><h2>Live stream</h2>
                 <div class="hero__actions">
-                  <button class="primary" id="btn-take">📸 Take photo</button>
+                  <button class="primary" id="btn-take">Take photo</button>
                 </div>
               </div>
               <div class="player__body"><div class="player-grid"><div class="player-preview">

@@ -39,6 +39,7 @@
 
 // Time sync: offset (server_time - local_monotonic_ms) in milliseconds
 static volatile int64_t g_time_offset_ms = 0;
+static volatile bool g_wifi_connected = false;
 // how often to sync time (ms) 
 #define TIME_SYNC_INTERVAL_MS (5 * 60 * 1000) // 5 minutes
 
@@ -178,6 +179,26 @@ static void time_sync_task(void *pv) {
 }
 
 /**
+ * @brief Periodic time synchronization loop. Ensures re-sync independent of events.
+ */
+static void time_sync_periodic_task(void *pv) {
+    (void)pv;
+    uint64_t last_sync_ms = 0;
+    for (;;) {
+        // Only attempt sync when connected
+        if (g_wifi_connected) {
+            uint64_t now_ms_rel = (uint64_t)(esp_timer_get_time() / 1000ULL);
+            if (last_sync_ms == 0 || (now_ms_rel - last_sync_ms) > TIME_SYNC_INTERVAL_MS) {
+                if (sync_time_with_server() == ESP_OK) {
+                    last_sync_ms = now_ms_rel;
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+/**
  * @brief WiFi event handler.
  * 
  * @param arg Argument pointer
@@ -199,6 +220,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
                     wifi_event_sta_disconnected_t *dis = (wifi_event_sta_disconnected_t *)event_data;
                     ESP_LOGW(TAG, "WiFi disconnected (reason=%d), reconnecting...", dis ? dis->reason : -1);
                 }
+                g_wifi_connected = false;
                 esp_wifi_connect();
                 break;
             default:
@@ -214,6 +236,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
                      (unsigned)((ip >> 24) & 0xFF), (unsigned)((ip >> 16) & 0xFF),
                      (unsigned)((ip >> 8) & 0xFF), (unsigned)(ip & 0xFF));
             ESP_LOGI(TAG, "Got IP: %s", ip_str);
+            g_wifi_connected = true;
             // Start time sync task
             xTaskCreate(time_sync_task, "time_sync", 4096, NULL, 5, NULL);
         }
@@ -259,47 +282,29 @@ static void wifi_init_sta(void){
     ESP_LOGI(TAG, "wifi_init_sta finished.");
 }
 
-/**
- * @brief GPIO interrupt service routine handler.
- * 
- * @param arg GPIO number
- */
-static void IRAM_ATTR gpio_isr_handler(void* arg){
-    // Get GPIO number from argument
-    uint32_t gpio_num = (uint32_t) arg;
-    // Disable further interrupts for this pin immediately
-    gpio_intr_disable((gpio_num_t)gpio_num);
-    // Notify the GPIO event queue
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xQueueSendFromISR(gpio_evt_queue, &gpio_num, &xHigherPriorityTaskWoken);
-    if (xHigherPriorityTaskWoken) {
-        portYIELD_FROM_ISR();
-    }
-}
+
 
 /**
  * @brief GPIO task to handle GPIO events.
  * 
  * @param arg Argument pointer
  */
-static void gpio_task(void* arg){
-    uint32_t io_num;
-    // Main loop to process GPIO events
+// Polling-based GPIO task for PIR with burst logic
+static void gpio_poll_task(void* arg){
+    int last_level = 0;
+    const uint32_t picture_interval_ms = 10000; // 10s between pictures
     for (;;) {
-        // Wait for GPIO event
-        if (xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
-            vTaskDelay(pdMS_TO_TICKS(50));
+        int level = gpio_get_level(PIR_GPIO);
 
-            // Get current timestamp in milliseconds
+        if (level == 1) {
+            vTaskDelay(pdMS_TO_TICKS(100)); // Debounce delay
             uint64_t ts_ms = esp_timer_get_time() / 1000ULL;
-            if (pub_queue) {
-                // Send timestamp to publisher queue
+            if ( gpio_get_level(PIR_GPIO) && pub_queue ) {
                 xQueueSend(pub_queue, &ts_ms, 0);
             }
-
-            vTaskDelay(pdMS_TO_TICKS(5000));
-            gpio_intr_enable((gpio_num_t)io_num);
+            vTaskDelay(pdMS_TO_TICKS(picture_interval_ms));
         }
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -313,6 +318,7 @@ static void publisher_task(void* arg){
     (void)arg;
     uint64_t ts_ms;
     uint64_t last_sync_ms = 0;
+    uint64_t last_sync_attempt_ms = 0;
     // Main loop to process publish events
     for (;;) {
         // Wait for publish event
@@ -320,8 +326,12 @@ static void publisher_task(void* arg){
             uint64_t now_ms_rel = (uint64_t)(esp_timer_get_time() / 1000ULL);
             // Check if time sync is needed
             if (last_sync_ms == 0 || (now_ms_rel - last_sync_ms) > TIME_SYNC_INTERVAL_MS) {
-                if (sync_time_with_server() == ESP_OK) {
-                    last_sync_ms = now_ms_rel;
+                // Avoid rapid retries on failure
+                if (last_sync_attempt_ms == 0 || (now_ms_rel - last_sync_attempt_ms) > 10000) {
+                    last_sync_attempt_ms = now_ms_rel;
+                    if (sync_time_with_server() == ESP_OK) {
+                        last_sync_ms = now_ms_rel;
+                    }
                 }
             }
 
@@ -360,6 +370,7 @@ static void publisher_task(void* arg){
 
                 char rbuf[512];
                 int rtotal = 0;
+                esp_err_t fh = esp_http_client_fetch_headers(client);
                 int64_t content_len = esp_http_client_get_content_length(client);
                 if (content_len > 0) {
                     int toread = (int)content_len;
@@ -402,29 +413,27 @@ void app_main(void){
     // Initialize WiFi
     wifi_init_sta();
 
-    // Configure PIR GPIO pin
+    // Configure PIR GPIO pin for polling
     gpio_config_t io_conf = {};
-    io_conf.intr_type = GPIO_INTR_POSEDGE;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
     io_conf.mode = GPIO_MODE_INPUT;
     io_conf.pin_bit_mask = (1ULL << PIR_GPIO);
-    io_conf.pull_down_en = 1;
+    io_conf.pull_down_en = 0;
+    io_conf.pull_up_en = 1;
     gpio_config(&io_conf);
+    ESP_LOGI(TAG, "PIR initial level: %d", gpio_get_level(PIR_GPIO));
 
-    // Create a queue to handle gpio event from isr
-    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
-
-    // Create queue for publisher 
+    // Create queue for publisher
     pub_queue = xQueueCreate(10, sizeof(uint64_t));
 
-    // Start gpio task
-    xTaskCreate(gpio_task, "gpio_task", 2048, NULL, 5, NULL);
+    // Start polling gpio task
+    xTaskCreate(gpio_poll_task, "gpio_poll_task", 2048, NULL, 5, NULL);
 
     // Start publisher task with large stack for HTTP/TLS work
     xTaskCreate(publisher_task, "publisher_task", 8192, NULL, 5, NULL);
 
-    // Install GPIO ISR service and attach handler
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(PIR_GPIO, gpio_isr_handler, (void*) PIR_GPIO);
+    // Start periodic time sync task to ensure re-syncs happen reliably
+    xTaskCreate(time_sync_periodic_task, "time_sync_loop", 4096, NULL, 5, NULL);
 
     // Main loop does nothing, all work is done in tasks
     while (1) {
