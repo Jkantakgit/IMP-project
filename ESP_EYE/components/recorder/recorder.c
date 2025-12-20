@@ -1,3 +1,9 @@
+/**
+ * @file recorder.c
+ * @author xholanp00
+ * @brief Camera recorder component, providing image capture functionality and initialization
+ * 
+ */
 
 #include "recorder.h"
 
@@ -119,20 +125,6 @@ static void recorder_start_worker(void){
     }
 }
 
-/**
- * @brief Stop the recorder worker task
- * 
- */
-static void recorder_stop_worker(void){
-    if (s_capture_worker) {
-        vTaskDelete(s_capture_worker);
-        s_capture_worker = NULL;
-    }
-    if (s_capture_queue) {
-        vQueueDelete(s_capture_queue);
-        s_capture_queue = NULL;
-    }
-}
 
 /**
  * @brief Initialize the recorder

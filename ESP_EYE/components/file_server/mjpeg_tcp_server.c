@@ -1,5 +1,8 @@
-/* Lightweight MJPEG TCP streamer running on its own FreeRTOS task
- * Streams multipart/x-mixed-replace MJPEG on port 8081.
+/**
+ * @file mjpeg_tcp_server.c
+ * @author xholanp00
+ * @brief MJPEG TCP server for streaming camera feed over TCP
+ * 
  */
 
 #include <string.h>

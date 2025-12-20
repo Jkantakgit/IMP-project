@@ -1,3 +1,10 @@
+/**
+ * @file wifi_helpers.c
+ * @author xholanp00
+ * @brief Wi-Fi helper functions for initializing AP/STA modes
+ * 
+ */
+
 #include "wifi_helpers.h"
 #include "esp_mac.h"
 #include "esp_wifi.h"
