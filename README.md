@@ -30,13 +30,14 @@ Dále bylo studováno chování PIR senzoru a jeho propojení s mikrokontrolére
 
 ### Detekční jednotka (PIR senzor + ESP32)
 
-Detekční jednotka je tvořena modulem ESP32 a PIR senzorem. Zapojení senzoru je následující:
 
-- pin VCC je připojen na napájecí napětí 3,3 V,
-- pin GND je připojen na zem,
-- pin VOUT je připojen na vstupně-výstupní pin IO2 mikrokontroléru ESP32.
+Detekční jednotka je tvořena modulem ESP32 a PIR senzorem. PIR senzor je připojen na vstupně-výstupní pin IO2 mikrokontroléru ESP32:
 
-Na pinu IO2 je nakonfigurováno přerušení (interrupt), které se vyvolá při detekci pohybu. V okamžiku přerušení ESP32 odešle HTTP požadavek na webový server kamery na endpoint `/photo` s daty ve formátu:
+- VCC je připojen na napájecí napětí 3,3 V
+- GND je připojen na zem
+- VOUT je připojen na IO2
+
+Pro detekci pohybu je použit polling s debouncingem. Pokud je detekován pohyb, ESP32 odešle HTTP požadavek na webový server kamery na endpoint `/photo` s daty ve formátu:
 
 ```json
 { "capture": timestamp }
@@ -44,12 +45,16 @@ Na pinu IO2 je nakonfigurováno přerušení (interrupt), které se vyvolá při
 
 Pokud je požadavek zamítnut z důvodu nesouladu časového okna, zařízení provede synchronizaci času s webovým serverem a následně se pokusí požadavek odeslat znovu.
 
+Interval mezi kontrolami pohybu je 10 sekund, pokud byl zaznamenán pohyb, a 100 ms, pokud pohyb zaznamenán nebyl.
+
 ### Kamerová jednotka (ESP32-CAM)
 
 ESP32-CAM slouží jako kamerová jednotka systému a provozuje dva samostatné webové servery:
 
 - první server zajišťuje zobrazování webové stránky, stahování pořízených snímků a ovládání zařízení,
 - druhý server poskytuje živý obrazový přenos (live feed).
+
+Ke komunikaci s SD kartou je využito rozhraní SPI.
 
 Zařízení si udržuje vlastní čas, který je aktualizován pokaždé, když se jakékoliv zařízení připojí k webovému serveru (při otevření webové stránky). Kamerová jednotka rovněž pracuje s časovým oknem, ve kterém přijímá příkazy k pořízení fotografie. Pokud je požadavek odeslán mimo toto časové okno, není vykonán.
 
@@ -74,4 +79,4 @@ V případě, že je požadavek zamítnut z důvodu nesouladu času, detekční 
 Systém rovněž umožňuje vzdálený přístup k živému obrazovému přenosu a k uloženým fotografiím prostřednictvím webového rozhraní kamerové jednotky.
 
 ### Odkaz na ukazkove video
-
+https://nextcloud.fit.vutbr.cz/s/GgdJmimGtjdpKxX
